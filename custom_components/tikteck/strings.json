@@ -9,6 +9,14 @@
           "recover": "Recover / reset a bulb (RF reset)"
         }
       },
+      "discovery_menu": {
+        "title": "Tikteck bulb found",
+        "description": "Set this bulb up normally, or RF-reset it if you can't log in (e.g. it's still bound to another phone).",
+        "menu_options": {
+          "configure": "Set up this bulb",
+          "recover": "Recover / reset this bulb (RF reset)"
+        }
+      },
       "configure": {
         "title": "Pick a Tikteck bulb",
         "data": {
@@ -41,7 +49,8 @@
       "cannot_connect": "Could not connect. Make sure the bulb is powered and the phone app is closed.",
       "not_found": "Bulb not currently seen by any Bluetooth adapter.",
       "rf_reset_failed": "Could not connect to the bulb for the RF reset. Move closer, power-cycle the bulb, and try again within ~60 seconds.",
-      "rf_reset_no_ack": "The reset command was sent but the bulb did not confirm. It may be outside the ~60 s power-on window — power-cycle and submit again."
+      "rf_reset_no_ack": "The reset command was sent but the bulb did not confirm. It may be outside the ~60 s power-on window — power-cycle and submit again.",
+      "rf_reset_unverified": "The reset was accepted by the bulb, but it did not answer the default password '123' afterwards yet. Give it a few seconds, power-cycle, and submit again — or use 'Set up a bulb' with password 123."
     },
     "abort": {
       "already_configured": "This bulb is already configured.",

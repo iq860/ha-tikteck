@@ -152,6 +152,23 @@ owner recover a bulb they were locked out of.
 4. `write_gatt_char(0x1921…, bytes([0x69,0x69,0x11,0x00] + [0]*12), response=False)`.
 5. Optionally read back and check for `69 69 11 10`. Must complete inside ~60 s of boot.
 
+> **Validated on-air (v0.2.0) — and it is link-quality sensitive.** Tested on bulb
+> `…02:0C:46` (firmware 37) through an ESP proxy. The characteristic resolves to
+> `19210d0c-0b0a-0908-0706-050403020100` in service `19200d0c-…`.
+>
+> | attempt | link RSSI | reply to `69 69 11 00` | reset? |
+> |---|---|---|---|
+> | weak | **-96 dBm** | `69 69 11 `**`13 20`**` …` | **no** — bulb still rejected password `123` |
+> | close | **-72 dBm** | `69 69 11 `**`10 00`**` …` | **yes** — bulb then logged in with `123` |
+>
+> So **byte[3] is the accept/reject marker: `0x10` = accepted, `0x13` = refused.** The
+> documented status `0x37` at offset 4 was **not** seen (offset 4 was `0x00` on the
+> successful reset), so don't gate on it. The echo alone is unreliable — the only solid
+> confirmation is to **log in with the post-reset defaults (`Smart Light` / `123`)**,
+> which the integration now does automatically before reporting success. Writing both
+> flags (`0x00` then `0x01`) in the one power-on window, and getting the bulb close to the
+> adapter/proxy, both materially improve the odds.
+
 ### 4.2 Factory reset ("reset all") — `BTDataHandle_resetAll`
 
 `factoryReset(devAddr)` → guarded by `isConnected()` → `mainDev.sendData(data, enc=true, 2)`.
@@ -331,12 +348,17 @@ the password; that RF reset does **not** (unauthenticated write to `1921`/`1920`
 power-on window); firmware version is passively readable (`manu[10]>>2`); factory-reset
 opcode `0xFC`; the full GATT + command map.
 
+**Validated since (v0.2.0):** the RF reset (§4.1) now works on real firmware-37 hardware
+through an ESP proxy — accept marker `69 69 11 10`, confirmed by a default-password login,
+and found to be **link-quality sensitive** (fails at ~-96 dBm, succeeds at ~-72 dBm).
+`slCmdChar` is written **without** response. See the §4.1 validation box.
+
 **Still open — validate before relying on in production:**
 - [ ] **Capture an HCI snoop log** from a phone running the real app during (a) an RF
-  reset and (b) a factory reset, and diff against §4.1/§4.2 byte-for-byte. This is the
-  one thing not verified on-air.
+  reset and (b) a factory reset, and diff against §4.1/§4.2 byte-for-byte, to pin down the
+  meaning of the `13 20` (refused) vs `10 00` (accepted) reply tails.
 - [ ] Confirm the exact length of the RF-reset power-on window per firmware (doc says
-  "~1 min"; may differ) and whether `slCmdChar` must be written with/without response.
+  "~1 min"; may differ).
 - [ ] Confirm whether firmware `< 24` exposes service `1920` at all (if not, those bulbs
   are power-cycle-only and an RF-reset button should be hidden for them).
 - [ ] Decode the `setKey` frame (opcode + payload) so an integration could *re-key* a

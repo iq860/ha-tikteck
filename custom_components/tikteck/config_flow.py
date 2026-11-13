@@ -54,7 +54,13 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         self._discovery = discovery_info
         self.context["title_placeholders"] = {"name": f"{discovery_info.name} ({discovery_info.address})"}
-        return await self.async_step_password()
+        return await self.async_step_discovery_menu()
+
+    async def async_step_discovery_menu(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Clicking 'Add' on a discovered bulb: set it up, or RF-reset it."""
+        return self.async_show_menu(
+            step_id="discovery_menu", menu_options=["configure", "recover"]
+        )
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
@@ -74,6 +80,10 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
         return found
 
     async def async_step_configure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        # Reached from a discovered-bulb 'Add' → the address is already known.
+        if self._discovery is not None:
+            self.context["address"] = self._discovery.address
+            return await self.async_step_password()
         if user_input is not None:
             address = user_input[CONF_ADDRESS]
             await self.async_set_unique_id(address, raise_on_progress=False)
@@ -90,6 +100,10 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_recover(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Pick a bulb to RF-reset (works even on bulbs you can't log into)."""
+        # Reached from a discovered-bulb 'Add' → the address is already known.
+        if self._discovery is not None:
+            self.context["recover_address"] = self._discovery.address
+            return await self.async_step_rf_confirm()
         if user_input is not None:
             self.context["recover_address"] = user_input[CONF_ADDRESS]
             return await self.async_step_rf_confirm()
@@ -102,7 +116,13 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="recover", data_schema=schema)
 
     async def async_step_rf_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Perform the unauthenticated RF reset inside the post-power-on window."""
+        """RF-reset the bulb, then verify by pairing with the defaults and add it.
+
+        Rather than stay silent after firing the reset frame, this re-pairs with the
+        post-reset defaults (mesh 'Smart Light' / password '123'), and on success adds
+        the bulb automatically so the whole recover → reset → pair → set-up sequence
+        completes in one step. A reset that can't be confirmed is reported, not swallowed.
+        """
         address = self.context["recover_address"]
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -123,19 +143,63 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
                     _LOGGER.exception("Tikteck %s: RF reset error", address)
                     errors["base"] = "rf_reset_failed"
                 else:
-                    if ok:
-                        return self.async_abort(
-                            reason="rf_reset_ok",
-                            description_placeholders={"address": address, "reply": detail},
+                    # The reply echo is unreliable (the bulb acks even when it doesn't
+                    # reset), so the ground truth is whether it now pairs with the default
+                    # password. Always verify, whatever the echo said.
+                    _LOGGER.info(
+                        "Tikteck %s: RF reset reply %s (success_discriminator=%s); verifying default pairing",
+                        address, detail or "none", ok,
+                    )
+                    verified = await self._verify_default_login(address)
+                    if verified:
+                        _LOGGER.info(
+                            "Tikteck %s: default pairing confirmed after reset — adding bulb", address
                         )
-                    _LOGGER.warning("Tikteck %s: RF reset sent but no success reply (%s)", address, detail)
-                    errors["base"] = "rf_reset_no_ack"
+                        await self.async_set_unique_id(address, raise_on_progress=False)
+                        self._abort_if_unique_id_configured()
+                        return self.async_create_entry(
+                            title=f"Tikteck {address}",
+                            data={
+                                CONF_ADDRESS: address,
+                                CONF_PASSWORD: "123",
+                                CONF_MESH_NAME: DEFAULT_MESH_NAME,
+                            },
+                        )
+                    _LOGGER.warning(
+                        "Tikteck %s: reset not confirmed — reply %s, default login failed", address, detail
+                    )
+                    errors["base"] = "rf_reset_unverified"
         return self.async_show_form(
             step_id="rf_confirm",
             data_schema=vol.Schema({}),
             errors=errors,
             description_placeholders={"address": address},
         )
+
+    async def _verify_default_login(self, address: str, attempts: int = 4) -> bool:
+        """After a reset, confirm the bulb accepts the default mesh/password ('123')."""
+        for i in range(attempts):
+            await asyncio.sleep(3)  # give the bulb time to reboot into the default mesh
+            ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
+            if ble_device is None:
+                _LOGGER.debug("Tikteck %s: default-login attempt %d — bulb not seen yet", address, i + 1)
+                continue
+            bulb = TikteckBulb(
+                ble_device,
+                "123",
+                DEFAULT_MESH_NAME,
+                candidates=lambda: connection_candidates(self.hass, address),
+            )
+            try:
+                await bulb.test_login()
+            except TikteckAuthError:
+                _LOGGER.debug("Tikteck %s: default-login attempt %d rejected", address, i + 1)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Tikteck %s: default-login attempt %d error: %s", address, i + 1, err)
+            else:
+                _LOGGER.info("Tikteck %s: default login succeeded on attempt %d", address, i + 1)
+                return True
+        return False
 
     async def async_step_password(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         address = self._discovery.address if self._discovery else self.context["address"]

@@ -91,20 +91,42 @@ async def async_rf_reset(
             raise TikteckResetError(
                 f"SmartLight command characteristic ({SL_CMD_UUID_FRAGMENT}) not found"
             )
-        flag = 0x01 if password_only else 0x00
-        frame = bytes([0x69, 0x69, 0x11, flag] + [0] * 12)
-        _LOGGER.debug("Tikteck %s: RF reset — writing %s to %s", address, frame.hex(), char.uuid)
-        await client.write_gatt_char(char, frame, response=False)
-        await asyncio.sleep(0.5)
-        reply = b""
-        try:
-            reply = bytes(await client.read_gatt_char(char))
-        except (BleakError, OSError) as err:
-            _LOGGER.debug("Tikteck %s: RF reset read-back failed: %s", address, err)
-        # Success reply echoes 69 69 11 10 (docs/PROTOCOL.md §4.1).
-        ok = len(reply) >= 4 and reply[0:3] == b"\x69\x69\x11"
-        _LOGGER.info("Tikteck %s: RF reset sent, reply %s (ok=%s)", address, reply.hex() or "none", ok)
-        return ok, reply.hex()
+        # Try both reset flags in the one post-power-on window: full restore (0x00,
+        # name+password+config) then password-only (0x01). The bulb always echoes the
+        # sub-command (69 69 11 ...) just to say the write was received; a *successful*
+        # reset echoes 69 69 11 10 with status 0x37 at offset 4 (docs/PROTOCOL.md §4.1).
+        # A reply like 69 69 11 13 20 is an ack WITHOUT a reset. The echo is therefore not
+        # trusted either way — the caller still confirms by logging in with the defaults.
+        flags = [0x01] if password_only else [0x00, 0x01]
+        replies: list[str] = []
+        ok = False
+        for flag in flags:
+            frame = bytes([0x69, 0x69, 0x11, flag] + [0] * 12)
+            _LOGGER.debug("Tikteck %s: RF reset — writing %s to %s", address, frame.hex(), char.uuid)
+            try:
+                await client.write_gatt_char(char, frame, response=False)
+                await asyncio.sleep(0.5)
+                reply = bytes(await client.read_gatt_char(char))
+            except (BleakError, OSError) as err:
+                _LOGGER.debug("Tikteck %s: RF reset flag 0x%02x write/read failed: %s", address, flag, err)
+                replies.append(f"{flag:02x}:err")
+                continue
+            # Validated on-air: at a good link the bulb accepts with byte[3] == 0x10
+            # (reply 69 69 11 10 00...) and actually resets; at a weak link it answers
+            # 69 69 11 13 20 — an ack that does NOT reset. byte[3] (0x10 vs 0x13) is the
+            # accept/reject marker; the doc's status 0x37 was not observed, so it is not
+            # required. The default-login check in the config flow remains the ground truth.
+            echoed = len(reply) >= 3 and reply[0:3] == b"\x69\x69\x11"
+            success = len(reply) >= 4 and reply[0:3] == b"\x69\x69\x11" and reply[3] == 0x10
+            ok = ok or success
+            replies.append(f"{flag:02x}:{reply.hex()}")
+            _LOGGER.info(
+                "Tikteck %s: RF reset flag 0x%02x reply %s (echo=%s, success=%s)",
+                address, flag, reply.hex() or "none", echoed, success,
+            )
+            await asyncio.sleep(0.3)
+        detail = " ".join(replies)
+        return ok, detail
     finally:
         try:
             await client.disconnect()
