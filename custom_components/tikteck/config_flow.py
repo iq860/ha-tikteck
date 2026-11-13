@@ -22,7 +22,13 @@ from homeassistant.core import callback
 
 from .const import CONF_MESH_NAME, DOMAIN
 from .helpers import ADAPTER_AUTO, CONF_ADAPTER, adapter_choices, connection_candidates
-from .protocol import DEFAULT_MESH_NAME, TikteckAuthError, TikteckBulb
+from .protocol import (
+    DEFAULT_MESH_NAME,
+    TikteckAuthError,
+    TikteckBulb,
+    TikteckResetError,
+    async_rf_reset,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +57,23 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
         return await self.async_step_password()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="user", menu_options=["configure", "recover"]
+        )
+
+    def _discovered_bulbs(self, include_configured: bool = False) -> dict[str, str]:
+        """Tikteck bulbs currently seen, as {address: label} for a dropdown."""
+        current = self._async_current_ids()
+        found: dict[str, str] = {}
+        for info in async_discovered_service_info(self.hass, connectable=True):
+            if not _is_tikteck(info):
+                continue
+            if not include_configured and info.address in current:
+                continue
+            found[info.address] = f"{info.name} ({info.address})"
+        return found
+
+    async def async_step_configure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             address = user_input[CONF_ADDRESS]
             await self.async_set_unique_id(address, raise_on_progress=False)
@@ -59,14 +82,60 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
             self.context["address"] = address
             return await self.async_step_password()
 
-        current = self._async_current_ids()
-        for info in async_discovered_service_info(self.hass, connectable=True):
-            if info.address not in current and _is_tikteck(info):
-                self._found[info.address] = f"{info.name} ({info.address})"
+        self._found = self._discovered_bulbs()
         schema = vol.Schema(
             {vol.Required(CONF_ADDRESS): vol.In(self._found) if self._found else str}
         )
-        return self.async_show_form(step_id="user", data_schema=schema)
+        return self.async_show_form(step_id="configure", data_schema=schema)
+
+    async def async_step_recover(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Pick a bulb to RF-reset (works even on bulbs you can't log into)."""
+        if user_input is not None:
+            self.context["recover_address"] = user_input[CONF_ADDRESS]
+            return await self.async_step_rf_confirm()
+
+        # Configured bulbs are included: the owner may want to wipe one they already have.
+        choices = self._discovered_bulbs(include_configured=True)
+        schema = vol.Schema(
+            {vol.Required(CONF_ADDRESS): vol.In(choices) if choices else str}
+        )
+        return self.async_show_form(step_id="recover", data_schema=schema)
+
+    async def async_step_rf_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Perform the unauthenticated RF reset inside the post-power-on window."""
+        address = self.context["recover_address"]
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
+            if ble_device is None:
+                errors["base"] = "not_found"
+            else:
+                try:
+                    ok, detail = await async_rf_reset(
+                        ble_device,
+                        address,
+                        candidates=lambda: connection_candidates(self.hass, address),
+                    )
+                except TikteckResetError as err:
+                    _LOGGER.warning("Tikteck %s: RF reset failed: %s", address, err)
+                    errors["base"] = "rf_reset_failed"
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Tikteck %s: RF reset error", address)
+                    errors["base"] = "rf_reset_failed"
+                else:
+                    if ok:
+                        return self.async_abort(
+                            reason="rf_reset_ok",
+                            description_placeholders={"address": address, "reply": detail},
+                        )
+                    _LOGGER.warning("Tikteck %s: RF reset sent but no success reply (%s)", address, detail)
+                    errors["base"] = "rf_reset_no_ack"
+        return self.async_show_form(
+            step_id="rf_confirm",
+            data_schema=vol.Schema({}),
+            errors=errors,
+            description_placeholders={"address": address},
+        )
 
     async def async_step_password(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         address = self._discovery.address if self._discovery else self.context["address"]

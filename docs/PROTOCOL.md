@@ -208,6 +208,34 @@ Offsets decoded from the `manu_elem` jump table in `libskytone-jni.so` (element�
 up front whether a bulb needs a power-cycle reset (<24) or an RF reset (≥24), and whether
 it's already claimed by another mesh.
 
+> **Implemented (v0.2.0).** `helpers.parse_telink_adv()` decodes this block from HA's
+> `manufacturer_data[529]`, and `sensor.TikteckFirmwareSensor` exposes the firmware
+> version with `mesh_node_address`, `mesh_id`, `provisioned` and a `reset_method`
+> attribute (`power_cycle`/`rf_reset`).
+>
+> **Validated on-air** against three real bulbs (host BlueZ `ManufacturerData`):
+>
+> | bulb (MAC tail) | 529 block (first 15 bytes) | fw | node addr |
+> |---|---|---|---|
+> | `…6F:06:97` | `1102 97066f4d 1a01 94 9700 6203 1b19` | 37 | `0x0097` |
+> | `…02:0C:46` | `1102 460c024d 1a01 95 4600 5b5e a92d` | 37 | `0x0046` |
+> | `…03:0C:1D` | `1102 1d0c034d 1a01 95 9900 336b d619` | 37 | `0x0099` |
+>
+> `node addr` = `value[9:11]` LE; for two of the three it equals the MAC's low byte
+> (`0x97`, `0x46`), which anchors the offsets. The third is a mesh-assigned address (that
+> bulb is bound to another phone's mesh). All three are firmware **37 (≥24)** → RF-reset
+> path, confirming these bulbs do **not** respond to a power-cycle reset.
+>
+> **Gotcha — don't grab the first manufacturer block.** On `…02:0C:46` the BlueZ device
+> object also carried an **Apple iBeacon** entry (company id `0x004C` / 76, payload
+> `0215…` = the iBeacon type+length prefix) *in addition to* the Telink `0x0211` block.
+> It is almost certainly **not** the bulb — a Telink bulb doesn't emit iBeacons; BlueZ had
+> merged a neighbouring Apple advertiser onto that device, or it was transient. A parser
+> that reads "the first manufacturer-data block" would decode `0215…` as a bogus firmware
+> (we briefly read `firmware=2` from it). **Always select `manufacturer_data[529]`
+> explicitly** — which is exactly what `parse_telink_adv()` does. Noted here for future
+> dev; if the iBeacon turns out to recur only on this one bulb, it's worth a second look.
+
 ---
 
 ## 6. Command surface (native `BTDataHandle_*`, for future feature work)

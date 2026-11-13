@@ -22,6 +22,12 @@ Bluetooth stack ([Bleak] + [bleak-retry-connector]), so it works with:
 - HS colour + brightness, with a perceptual (gamma) brightness curve so the slider
   tracks visible brightness instead of the bulb's raw linear PWM
 - Connection is kept alive and reused, then dropped after idle
+- **Passive firmware/diagnostics** — a *Firmware version* sensor read straight from the
+  bulb's advertisement (no connection, no password), with `mesh_node_address`, `mesh_id`,
+  `provisioned` and a `reset_method` attribute telling you which reset the bulb needs
+- **RF-reset recovery** — *Add Integration → Tikteck → Recover / reset a bulb* resets a
+  bulb you can't log into (e.g. one still bound to another phone), unauthenticated, within
+  the bulb's ~60 s post-power-on window
 
 ## Requirements
 

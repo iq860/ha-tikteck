@@ -13,6 +13,41 @@ except ImportError:  # pragma: no cover
 CONF_ADAPTER = "adapter"
 ADAPTER_AUTO = "auto"
 
+# Telink / Tikteck manufacturer-specific advertisement (company id 0x0211 = 529).
+# Offsets validated on-air against a real bulb: the decoded mesh node address equals
+# the low two bytes of the device MAC. See docs/PROTOCOL.md §5.
+TELINK_COMPANY_ID = 529
+
+# Firmware >= this value means the bulb will NOT reset on a power-cycle and needs the
+# RF reset instead (docs/PROTOCOL.md §3).
+RF_RESET_FIRMWARE = 24
+
+
+def parse_telink_adv(manufacturer_data: dict[int, bytes] | None) -> dict | None:
+    """Decode firmware/bound/address fields broadcast by the bulb — no connection needed.
+
+    Returns None when the advertisement isn't a Telink block (or is too short). The
+    returned dict is safe to expose as diagnostic state.
+    """
+    if not manufacturer_data:
+        return None
+    value = manufacturer_data.get(TELINK_COMPANY_ID)
+    if not value or len(value) < 13:
+        return None
+    # value == the app's manu[] block starting at the repeated company-id pair, so the
+    # jump-table offsets (manu[8]/manu[9]/manu[10]/manu[11:13]/manu[13:15]) land here.
+    flags = value[8]
+    firmware = flags >> 2
+    return {
+        "firmware": firmware,
+        "bound": bool(flags & 0x01),
+        "dev_addr": int.from_bytes(value[9:11], "little"),
+        "mesh_id": int.from_bytes(value[11:13], "little"),
+        "product_type": value[6],
+        "product_subtype": value[7],
+        "reset_method": "power_cycle" if firmware < RF_RESET_FIRMWARE else "rf_reset",
+    }
+
 
 def scanner_devices(hass: HomeAssistant, address: str):
     """Connectable scanners that currently see the bulb, ESP proxies first then by RSSI."""

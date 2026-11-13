@@ -23,5 +23,5 @@
   "iot_class": "assumed_state",
   "issue_tracker": "https://github.com/iq860/ha-tikteck/issues",
   "requirements": [],
-  "version": "0.1.2"
+  "version": "0.2.0"
 }

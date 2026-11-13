@@ -23,6 +23,94 @@ CHAR_PAIR = "00010203-0405-0607-0809-0a0b0c0d1914"  # handle 0x1b
 DEFAULT_MESH_NAME = "Smart Light"
 DISCONNECT_DELAY = 120
 
+# SmartLight config service/characteristic used for the unauthenticated RF reset
+# (docs/PROTOCOL.md §4.1). The write is plaintext and goes to a separate characteristic
+# from the encrypted mesh rwChar, which is why it needs no login — but the firmware only
+# honours it for ~60 s after a cold boot.
+SL_CMD_UUID_FRAGMENT = "19210d0c"
+SL_SERVICE_UUID_FRAGMENT = "19200d0c"
+
+
+class TikteckResetError(Exception):
+    """RF reset could not be performed (no connection, or no command characteristic)."""
+
+
+def _find_sl_cmd_char(client: BleakClientWithServiceCache):
+    """Locate the SmartLight command characteristic (19210d0c...) for the RF reset."""
+    for service in client.services:
+        for ch in service.characteristics:
+            if SL_CMD_UUID_FRAGMENT in ch.uuid.lower():
+                return ch
+    # Fallback: any writable characteristic inside the 19200d0c config service.
+    for service in client.services:
+        if SL_SERVICE_UUID_FRAGMENT in service.uuid.lower():
+            for ch in service.characteristics:
+                props = ch.properties
+                if "write" in props or "write-without-response" in props:
+                    return ch
+    return None
+
+
+async def async_rf_reset(
+    ble_device: BLEDevice,
+    address: str,
+    candidates: Callable[[], list[tuple[str, BLEDevice]]] | None = None,
+    password_only: bool = False,
+) -> tuple[bool, str]:
+    """Send the unauthenticated RF reset frame (docs/PROTOCOL.md §4.1).
+
+    No login is performed. Must run inside the bulb's ~60 s post-power-on window.
+    Returns (success, detail) where detail is the hex reply (or an error note).
+    ``password_only=True`` resets only the password (flag 0x01); the default clears
+    name + password + config (flag 0x00, the app's "Restore").
+    """
+    options = candidates() if candidates else []
+    if not options:
+        options = [("default", ble_device)]
+
+    client: BleakClientWithServiceCache | None = None
+    last_err: Exception | None = None
+    for label, device in options:
+        _LOGGER.debug("Tikteck %s: RF reset — connecting via %s", address, label)
+        try:
+            client = await establish_connection(
+                BleakClientWithServiceCache, device, address, max_attempts=3
+            )
+        except (BleakError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.debug("Tikteck %s: RF reset connect via %s failed: %s", address, label, err)
+            last_err = err
+            continue
+        _LOGGER.debug("Tikteck %s: RF reset — connected via %s", address, label)
+        break
+    if client is None:
+        raise TikteckResetError(f"could not connect: {last_err}")
+
+    try:
+        char = _find_sl_cmd_char(client)
+        if char is None:
+            raise TikteckResetError(
+                f"SmartLight command characteristic ({SL_CMD_UUID_FRAGMENT}) not found"
+            )
+        flag = 0x01 if password_only else 0x00
+        frame = bytes([0x69, 0x69, 0x11, flag] + [0] * 12)
+        _LOGGER.debug("Tikteck %s: RF reset — writing %s to %s", address, frame.hex(), char.uuid)
+        await client.write_gatt_char(char, frame, response=False)
+        await asyncio.sleep(0.5)
+        reply = b""
+        try:
+            reply = bytes(await client.read_gatt_char(char))
+        except (BleakError, OSError) as err:
+            _LOGGER.debug("Tikteck %s: RF reset read-back failed: %s", address, err)
+        # Success reply echoes 69 69 11 10 (docs/PROTOCOL.md §4.1).
+        ok = len(reply) >= 4 and reply[0:3] == b"\x69\x69\x11"
+        _LOGGER.info("Tikteck %s: RF reset sent, reply %s (ok=%s)", address, reply.hex() or "none", ok)
+        return ok, reply.hex()
+    finally:
+        try:
+            await client.disconnect()
+        except (BleakError, OSError):
+            pass
+
 
 def _encrypt(key: list[int] | bytes, data: list[int] | bytes) -> list[int]:
     enc = Cipher(algorithms.AES(bytes(reversed(bytes(key)))), modes.ECB()).encryptor()

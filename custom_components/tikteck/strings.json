@@ -3,10 +3,29 @@
     "flow_title": "{name}",
     "step": {
       "user": {
+        "title": "Tikteck",
+        "menu_options": {
+          "configure": "Set up a bulb",
+          "recover": "Recover / reset a bulb (RF reset)"
+        }
+      },
+      "configure": {
         "title": "Pick a Tikteck bulb",
         "data": {
           "address": "Bluetooth address"
         }
+      },
+      "recover": {
+        "title": "Recover a Tikteck bulb",
+        "description": "RF reset clears a bulb that you can't log into (e.g. one still bound to another phone). It needs no password but only works within about 60 seconds of the bulb powering on. Pick the bulb, then follow the next step.",
+        "data": {
+          "address": "Bulb"
+        }
+      },
+      "rf_confirm": {
+        "title": "RF reset {address}",
+        "description": "Get close to the bulb, then: power it OFF and ON again, and press Submit within ~60 seconds. On success the bulb blinks and is reset to mesh name 'Smart Light' / password '123'. If it fails, power-cycle and submit again.",
+        "data": {}
       },
       "password": {
         "title": "Tikteck {address}",
@@ -20,16 +39,22 @@
     "error": {
       "invalid_auth": "Bulb rejected the password / mesh name.",
       "cannot_connect": "Could not connect. Make sure the bulb is powered and the phone app is closed.",
-      "not_found": "Bulb not currently seen by any Bluetooth adapter."
+      "not_found": "Bulb not currently seen by any Bluetooth adapter.",
+      "rf_reset_failed": "Could not connect to the bulb for the RF reset. Move closer, power-cycle the bulb, and try again within ~60 seconds.",
+      "rf_reset_no_ack": "The reset command was sent but the bulb did not confirm. It may be outside the ~60 s power-on window — power-cycle and submit again."
     },
     "abort": {
-      "already_configured": "This bulb is already configured."
+      "already_configured": "This bulb is already configured.",
+      "rf_reset_ok": "RF reset succeeded for {address} (reply {reply}). The bulb is now reset to mesh name 'Smart Light' / password '123' and can be set up fresh."
     }
   },
   "entity": {
     "sensor": {
       "signal_strength": {
         "name": "Signal strength"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
       }
     }
   },
