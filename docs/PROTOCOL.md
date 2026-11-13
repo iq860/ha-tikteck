@@ -169,6 +169,17 @@ the bulb and want a clean wipe.
 > There is also a `BTDataHandle_reboot` builder (soft reboot, opcode byte at `[7]`),
 > distinct from reset — it restarts the bulb without clearing credentials.
 
+### 4.3 Notes on reset variants (ruling things out)
+
+- **"BT reset" is not a separate command.** The app registers `bleBtResetCallBack` /
+  `bleRfResetCallBack`, but only `RfReset` and `resetAll` exist as native builders. The
+  BT-reset callback is vestigial; the real BLE resets are §4.1 (RF) and §4.2 (factory).
+- **Batch "Restore list" (`resetDev.html`)** just scans (`doScan`) and, per tapped device,
+  opens the *same* single-device reset flow (`skid: "reset_91"`, passing `mac` + `version`).
+  It is a convenience loop, not a new mechanism.
+- So the complete reset surface is exactly **three** paths (§3): power-cycle, RF reset,
+  factory reset. Nothing else resets a bulb.
+
 ---
 
 ## 5. Passive detection from the advertisement (no connection) ⭐
@@ -244,7 +255,48 @@ on-air.
 
 ---
 
-## 8. Open questions / next steps
+## 8. Coverage map — what is fully understood vs. not examined
+
+**Fully traced (code-level, confident):**
+- Device identity, GATT service/characteristic discovery, property-based char matching.
+- Login handshake (`setTlLoginData` → `pairChar`) and the name⊕password → AES `sk` scheme.
+- Default credentials and the mesh-ownership/"authorized code" model.
+- **All three reset paths** and their exact triggers, target characteristics, byte
+  payloads, and auth requirements — incl. that RF reset is unauthenticated (§3, §4).
+- Passive advertisement parsing (version / bound / devAddr / meshNet) to the byte.
+- The full list of control/state command builders (§6).
+
+**Understood in concept, not decoded to the byte (tangential to reset/local control):**
+- Exact parameter layout of individual control commands (`setState` on/off/brightness,
+  `setColor`/`setDynamic`/`setGradient` payloads). Opcodes are `0xA9/0xAA`-family; params
+  not mapped.
+- `setKey` frame (would let you *re-key* a bulb, i.e. change its password).
+- `getState` / `OnlineStateParse` notification format (needed to report real state).
+- Family **QR / authorized-code** exact encoding — it carries the house `netID` +
+  mesh password (confirmed conceptually via `getHouseInfo`/`hashMeshIdToBroadcast`), but
+  the QR string format itself was not byte-decoded.
+
+**Not examined at all (separate subsystems, not needed for local reset/control):**
+- **Net2Bt remote/gateway** path (`Net2BtClient`, `net2BtInitHost`, `network_psw`) — how
+  the app controls bulbs over the internet via a gateway. A whole parallel transport.
+- **OTA firmware upgrade** flow (`upgradeChar`, `upgrade.html`, `getFwVer` of a file).
+- **Timers / scenes / alarms / switch-events** command internals.
+
+**Understood and deliberately skipped (no protocol value):**
+- **Music visualization** (`MusicService`): phone-side only. It plays a local audio file
+  via `MediaPlayer`, runs Android's `Visualizer` (`audiofx`) FFT, and streams *ordinary*
+  colour/`setState` commands from the capture callback. The bulb has no "music mode" — all
+  logic is on the phone. No new command, irrelevant to reset/ownership, and a poor fit for
+  HA (needs real-time audio FFT + high-rate BLE). Not worth porting.
+
+**Not validated on-air:** no BLE radio in the analysis container, so every byte sequence
+here is from static code, not a captured packet. One HCI snoop log from the real app
+would confirm §4 end-to-end.
+
+> Bottom line for resetting bulbs and basic local control: **complete.** The unexamined
+> items are remote control, OTA, and rich effects/scheduling — none of which affect reset.
+
+## 9. Open questions / next steps
 
 **Answered this session:** default creds (`Smart Light`/`123`); why software reset needs
 the password; that RF reset does **not** (unauthenticated write to `1921`/`1920` in the
