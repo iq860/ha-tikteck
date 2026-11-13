@@ -1,0 +1,19 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {"title": "Pick a Tikteck bulb", "data": {"address": "Bluetooth address"}},
+      "password": {
+        "title": "Tikteck {address}",
+        "description": "Enter the bulb's password (numeric code from the old Tikteck config / app). Mesh name is almost always 'Smart Light'.",
+        "data": {"password": "Password", "mesh_name": "Mesh name"}
+      }
+    },
+    "error": {
+      "invalid_auth": "Bulb rejected the password / mesh name.",
+      "cannot_connect": "Could not connect. Make sure the bulb is powered and the phone app is closed.",
+      "not_found": "Bulb not currently seen by any Bluetooth adapter."
+    },
+    "abort": {"already_configured": "This bulb is already configured."}
+  }
+}
