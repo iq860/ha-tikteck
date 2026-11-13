@@ -23,6 +23,116 @@ CHAR_PAIR = "00010203-0405-0607-0809-0a0b0c0d1914"  # handle 0x1b
 DEFAULT_MESH_NAME = "Smart Light"
 DISCONNECT_DELAY = 120
 
+# SmartLight config service/characteristic used for the unauthenticated RF reset
+# (docs/PROTOCOL.md §4.1). The write is plaintext and goes to a separate characteristic
+# from the encrypted mesh rwChar, which is why it needs no login — but the firmware only
+# honours it for ~60 s after a cold boot.
+SL_CMD_UUID_FRAGMENT = "19210d0c"
+SL_SERVICE_UUID_FRAGMENT = "19200d0c"
+
+
+class TikteckResetError(Exception):
+    """RF reset could not be performed (no connection, or no command characteristic)."""
+
+
+def _find_sl_cmd_char(client: BleakClientWithServiceCache):
+    """Locate the SmartLight command characteristic (19210d0c...) for the RF reset."""
+    for service in client.services:
+        for ch in service.characteristics:
+            if SL_CMD_UUID_FRAGMENT in ch.uuid.lower():
+                return ch
+    # Fallback: any writable characteristic inside the 19200d0c config service.
+    for service in client.services:
+        if SL_SERVICE_UUID_FRAGMENT in service.uuid.lower():
+            for ch in service.characteristics:
+                props = ch.properties
+                if "write" in props or "write-without-response" in props:
+                    return ch
+    return None
+
+
+async def async_rf_reset(
+    ble_device: BLEDevice,
+    address: str,
+    candidates: Callable[[], list[tuple[str, BLEDevice]]] | None = None,
+    password_only: bool = False,
+) -> tuple[bool, str]:
+    """Send the unauthenticated RF reset frame (docs/PROTOCOL.md §4.1).
+
+    No login is performed. Must run inside the bulb's ~60 s post-power-on window.
+    Returns (success, detail) where detail is the hex reply (or an error note).
+    ``password_only=True`` resets only the password (flag 0x01); the default clears
+    name + password + config (flag 0x00, the app's "Restore").
+    """
+    options = candidates() if candidates else []
+    if not options:
+        options = [("default", ble_device)]
+
+    client: BleakClientWithServiceCache | None = None
+    last_err: Exception | None = None
+    for label, device in options:
+        _LOGGER.debug("Tikteck %s: RF reset — connecting via %s", address, label)
+        try:
+            client = await establish_connection(
+                BleakClientWithServiceCache, device, address, max_attempts=3
+            )
+        except (BleakError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.debug("Tikteck %s: RF reset connect via %s failed: %s", address, label, err)
+            last_err = err
+            continue
+        _LOGGER.debug("Tikteck %s: RF reset — connected via %s", address, label)
+        break
+    if client is None:
+        raise TikteckResetError(f"could not connect: {last_err}")
+
+    try:
+        char = _find_sl_cmd_char(client)
+        if char is None:
+            raise TikteckResetError(
+                f"SmartLight command characteristic ({SL_CMD_UUID_FRAGMENT}) not found"
+            )
+        # Try both reset flags in the one post-power-on window: full restore (0x00,
+        # name+password+config) then password-only (0x01). The bulb always echoes the
+        # sub-command (69 69 11 ...) just to say the write was received; a *successful*
+        # reset echoes 69 69 11 10 with status 0x37 at offset 4 (docs/PROTOCOL.md §4.1).
+        # A reply like 69 69 11 13 20 is an ack WITHOUT a reset. The echo is therefore not
+        # trusted either way — the caller still confirms by logging in with the defaults.
+        flags = [0x01] if password_only else [0x00, 0x01]
+        replies: list[str] = []
+        ok = False
+        for flag in flags:
+            frame = bytes([0x69, 0x69, 0x11, flag] + [0] * 12)
+            _LOGGER.debug("Tikteck %s: RF reset — writing %s to %s", address, frame.hex(), char.uuid)
+            try:
+                await client.write_gatt_char(char, frame, response=False)
+                await asyncio.sleep(0.5)
+                reply = bytes(await client.read_gatt_char(char))
+            except (BleakError, OSError) as err:
+                _LOGGER.debug("Tikteck %s: RF reset flag 0x%02x write/read failed: %s", address, flag, err)
+                replies.append(f"{flag:02x}:err")
+                continue
+            # Validated on-air: at a good link the bulb accepts with byte[3] == 0x10
+            # (reply 69 69 11 10 00...) and actually resets; at a weak link it answers
+            # 69 69 11 13 20 — an ack that does NOT reset. byte[3] (0x10 vs 0x13) is the
+            # accept/reject marker; the doc's status 0x37 was not observed, so it is not
+            # required. The default-login check in the config flow remains the ground truth.
+            echoed = len(reply) >= 3 and reply[0:3] == b"\x69\x69\x11"
+            success = len(reply) >= 4 and reply[0:3] == b"\x69\x69\x11" and reply[3] == 0x10
+            ok = ok or success
+            replies.append(f"{flag:02x}:{reply.hex()}")
+            _LOGGER.info(
+                "Tikteck %s: RF reset flag 0x%02x reply %s (echo=%s, success=%s)",
+                address, flag, reply.hex() or "none", echoed, success,
+            )
+            await asyncio.sleep(0.3)
+        detail = " ".join(replies)
+        return ok, detail
+    finally:
+        try:
+            await client.disconnect()
+        except (BleakError, OSError):
+            pass
+
 
 def _encrypt(key: list[int] | bytes, data: list[int] | bytes) -> list[int]:
     enc = Cipher(algorithms.AES(bytes(reversed(bytes(key)))), modes.ECB()).encryptor()
@@ -73,12 +183,16 @@ class TikteckBulb:
         password: str,
         name: str = DEFAULT_MESH_NAME,
         candidates: Callable[[], list[tuple[str, BLEDevice]]] | None = None,
+        mesh_address: int | None = None,
     ) -> None:
         self._ble_device = ble_device
         # Returns [(adapter label, BLEDevice), ...] in the order to try.
         self._candidates = candidates
         self._password = password
         self._name = name
+        # Destination for mesh commands. None => 0xFFFF broadcast (every bulb on the mesh
+        # obeys). A node address => only that bulb, so entities control one bulb each.
+        self._mesh_address = mesh_address
         self._mac = [int(x, 16) for x in reversed(ble_device.address.split(":"))]
         self._client: BleakClientWithServiceCache | None = None
         self._sk: list[int] | None = None
@@ -88,6 +202,13 @@ class TikteckBulb:
 
     def set_ble_device(self, ble_device: BLEDevice) -> None:
         self._ble_device = ble_device
+
+    @property
+    def mesh_address(self) -> int | None:
+        return self._mesh_address
+
+    def set_mesh_address(self, mesh_address: int | None) -> None:
+        self._mesh_address = mesh_address
 
     @property
     def address(self) -> str:
@@ -157,8 +278,11 @@ class TikteckBulb:
                     packet = [0] * 20
                     packet[0] = self._seq & 0xFF
                     packet[1] = (self._seq >> 8) & 0xFF
-                    packet[5] = 0xFF  # msgid 0xffff low byte
-                    packet[6] = 0xFF  # msgid | 0x80
+                    # Destination address (little-endian). 0xFFFF = broadcast to the whole
+                    # mesh; a node address targets a single bulb.
+                    dest = 0xFFFF if self._mesh_address is None else self._mesh_address
+                    packet[5] = dest & 0xFF
+                    packet[6] = (dest >> 8) & 0xFF
                     packet[7] = command
                     packet[8] = 0x69
                     packet[9] = 0x69

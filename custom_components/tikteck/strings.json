@@ -3,10 +3,37 @@
     "flow_title": "{name}",
     "step": {
       "user": {
+        "title": "Tikteck",
+        "menu_options": {
+          "configure": "Set up a bulb",
+          "recover": "Recover / reset a bulb (RF reset)"
+        }
+      },
+      "discovery_menu": {
+        "title": "Tikteck bulb found",
+        "description": "Set this bulb up normally, or RF-reset it if you can't log in (e.g. it's still bound to another phone).",
+        "menu_options": {
+          "configure": "Set up this bulb",
+          "recover": "Recover / reset this bulb (RF reset)"
+        }
+      },
+      "configure": {
         "title": "Pick a Tikteck bulb",
         "data": {
           "address": "Bluetooth address"
         }
+      },
+      "recover": {
+        "title": "Recover a Tikteck bulb",
+        "description": "RF reset clears a bulb that you can't log into (e.g. one still bound to another phone). It needs no password but only works within about 60 seconds of the bulb powering on. Pick the bulb, then follow the next step.",
+        "data": {
+          "address": "Bulb"
+        }
+      },
+      "rf_confirm": {
+        "title": "RF reset {address}",
+        "description": "Get close to the bulb, then: power it OFF and ON again, and press Submit within ~60 seconds. On success the bulb blinks and is reset to mesh name 'Smart Light' / password '123'. If it fails, power-cycle and submit again.",
+        "data": {}
       },
       "password": {
         "title": "Tikteck {address}",
@@ -20,26 +47,37 @@
     "error": {
       "invalid_auth": "Bulb rejected the password / mesh name.",
       "cannot_connect": "Could not connect. Make sure the bulb is powered and the phone app is closed.",
-      "not_found": "Bulb not currently seen by any Bluetooth adapter."
+      "not_found": "Bulb not currently seen by any Bluetooth adapter.",
+      "rf_reset_failed": "Could not connect to the bulb for the RF reset. Move closer, power-cycle the bulb, and try again within ~60 seconds.",
+      "rf_reset_no_ack": "The reset command was sent but the bulb did not confirm. It may be outside the ~60 s power-on window — power-cycle and submit again.",
+      "rf_reset_unverified": "The reset was accepted by the bulb, but it did not answer the default password '123' afterwards yet. Give it a few seconds, power-cycle, and submit again — or use 'Set up a bulb' with password 123."
     },
     "abort": {
-      "already_configured": "This bulb is already configured."
+      "already_configured": "This bulb is already configured.",
+      "rf_reset_ok": "RF reset succeeded for {address} (reply {reply}). The bulb is now reset to mesh name 'Smart Light' / password '123' and can be set up fresh."
     }
   },
   "entity": {
     "sensor": {
       "signal_strength": {
         "name": "Signal strength"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
       }
     }
   },
   "options": {
+    "error": {
+      "bad_mesh_address": "Mesh address must be a hex number like 0x0097 (or just 97)."
+    },
     "step": {
       "init": {
-        "title": "Tikteck adapter",
-        "description": "Choose which Bluetooth adapter or proxy to use for this bulb. 'Automatic' prefers ESP proxies, which hold connections to these bulbs better than most host adapters.",
+        "title": "Tikteck options",
+        "description": "Adapter: which Bluetooth adapter or proxy to use. 'Automatic' prefers ESP proxies.\n\nMesh address: each lamp is controlled on its own by default (this bulb's node address, {default}). To control the whole mesh from this entity instead, type 'all'. Or enter a specific node address in hex (e.g. 0x0097). Leave blank for the default. To control several lamps together, make a Home Assistant Light group helper from the individual lights.",
         "data": {
-          "adapter": "Adapter"
+          "adapter": "Adapter",
+          "mesh_address": "Mesh address (blank = this bulb, 'all' = whole mesh)"
         }
       }
     }

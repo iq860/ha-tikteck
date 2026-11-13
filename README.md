@@ -22,6 +22,12 @@ Bluetooth stack ([Bleak] + [bleak-retry-connector]), so it works with:
 - HS colour + brightness, with a perceptual (gamma) brightness curve so the slider
   tracks visible brightness instead of the bulb's raw linear PWM
 - Connection is kept alive and reused, then dropped after idle
+- **Passive firmware/diagnostics** — a *Firmware version* sensor read straight from the
+  bulb's advertisement (no connection, no password), with `mesh_node_address`, `mesh_id`,
+  `provisioned` and a `reset_method` attribute telling you which reset the bulb needs
+- **RF-reset recovery** — *Add Integration → Tikteck → Recover / reset a bulb* resets a
+  bulb you can't log into (e.g. one still bound to another phone), unauthenticated, within
+  the bulb's ~60 s post-power-on window
 
 ## Requirements
 
@@ -51,6 +57,19 @@ If very low settings go dark, raise `MIN_OUT`; if the curve feels off, adjust `G
 ## Notes & limitations
 
 - These bulbs don't report state (`assumed_state`); HA shows the last commanded value.
+- **Each lamp is controlled on its own by default.** Bulbs that share a mesh name +
+  password are one mesh; to keep them independent the integration addresses commands to
+  each bulb's own node address (auto-derived; override per bulb under the integration's
+  options). To drive the whole mesh from one entity, set that entity's mesh address to
+  `all`. To control several lamps together, make a **Home Assistant *Light group* helper**
+  from the individual lights (Settings → Devices & services → Helpers).
+  - The auto node address is the bulb's passively-decoded address, falling back to the low
+    byte of its MAC. If a lamp stops responding after an update, set its mesh address to
+    `all` (or the correct hex node address) in the options.
+- **The *Firmware version* sensor needs a full advertisement.** ESPHome Bluetooth proxies
+  relay only the first ~6 bytes of these bulbs' manufacturer data (company id + MAC); the
+  firmware/flags/mesh fields are truncated, so over a proxy-only setup the sensor reads
+  *unavailable*. A host Bluetooth adapter in range sees the whole block and it populates.
 - Old Telink bulbs connect best over a nearby ESP proxy; some host adapters (e.g. Intel
   on BlueZ) connect then abort (`le-connection-abort-by-local`).
 - A **factory-reset** bulb falls back to mesh name `Smart Light` / password `123`. If you

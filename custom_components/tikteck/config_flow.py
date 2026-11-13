@@ -20,9 +20,21 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS, CONF_PASSWORD
 from homeassistant.core import callback
 
-from .const import CONF_MESH_NAME, DOMAIN
-from .helpers import ADAPTER_AUTO, CONF_ADAPTER, adapter_choices, connection_candidates
-from .protocol import DEFAULT_MESH_NAME, TikteckAuthError, TikteckBulb
+from .const import CONF_MESH_ADDRESS, CONF_MESH_NAME, DOMAIN
+from .helpers import (
+    ADAPTER_AUTO,
+    CONF_ADAPTER,
+    adapter_choices,
+    connection_candidates,
+    default_mesh_address,
+)
+from .protocol import (
+    DEFAULT_MESH_NAME,
+    TikteckAuthError,
+    TikteckBulb,
+    TikteckResetError,
+    async_rf_reset,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,9 +60,36 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         self._discovery = discovery_info
         self.context["title_placeholders"] = {"name": f"{discovery_info.name} ({discovery_info.address})"}
-        return await self.async_step_password()
+        return await self.async_step_discovery_menu()
+
+    async def async_step_discovery_menu(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Clicking 'Add' on a discovered bulb: set it up, or RF-reset it."""
+        return self.async_show_menu(
+            step_id="discovery_menu", menu_options=["configure", "recover"]
+        )
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="user", menu_options=["configure", "recover"]
+        )
+
+    def _discovered_bulbs(self, include_configured: bool = False) -> dict[str, str]:
+        """Tikteck bulbs currently seen, as {address: label} for a dropdown."""
+        current = self._async_current_ids()
+        found: dict[str, str] = {}
+        for info in async_discovered_service_info(self.hass, connectable=True):
+            if not _is_tikteck(info):
+                continue
+            if not include_configured and info.address in current:
+                continue
+            found[info.address] = f"{info.name} ({info.address})"
+        return found
+
+    async def async_step_configure(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        # Reached from a discovered-bulb 'Add' → the address is already known.
+        if self._discovery is not None:
+            self.context["address"] = self._discovery.address
+            return await self.async_step_password()
         if user_input is not None:
             address = user_input[CONF_ADDRESS]
             await self.async_set_unique_id(address, raise_on_progress=False)
@@ -59,14 +98,114 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
             self.context["address"] = address
             return await self.async_step_password()
 
-        current = self._async_current_ids()
-        for info in async_discovered_service_info(self.hass, connectable=True):
-            if info.address not in current and _is_tikteck(info):
-                self._found[info.address] = f"{info.name} ({info.address})"
+        self._found = self._discovered_bulbs()
         schema = vol.Schema(
             {vol.Required(CONF_ADDRESS): vol.In(self._found) if self._found else str}
         )
-        return self.async_show_form(step_id="user", data_schema=schema)
+        return self.async_show_form(step_id="configure", data_schema=schema)
+
+    async def async_step_recover(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Pick a bulb to RF-reset (works even on bulbs you can't log into)."""
+        # Reached from a discovered-bulb 'Add' → the address is already known.
+        if self._discovery is not None:
+            self.context["recover_address"] = self._discovery.address
+            return await self.async_step_rf_confirm()
+        if user_input is not None:
+            self.context["recover_address"] = user_input[CONF_ADDRESS]
+            return await self.async_step_rf_confirm()
+
+        # Configured bulbs are included: the owner may want to wipe one they already have.
+        choices = self._discovered_bulbs(include_configured=True)
+        schema = vol.Schema(
+            {vol.Required(CONF_ADDRESS): vol.In(choices) if choices else str}
+        )
+        return self.async_show_form(step_id="recover", data_schema=schema)
+
+    async def async_step_rf_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """RF-reset the bulb, then verify by pairing with the defaults and add it.
+
+        Rather than stay silent after firing the reset frame, this re-pairs with the
+        post-reset defaults (mesh 'Smart Light' / password '123'), and on success adds
+        the bulb automatically so the whole recover → reset → pair → set-up sequence
+        completes in one step. A reset that can't be confirmed is reported, not swallowed.
+        """
+        address = self.context["recover_address"]
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
+            if ble_device is None:
+                errors["base"] = "not_found"
+            else:
+                try:
+                    ok, detail = await async_rf_reset(
+                        ble_device,
+                        address,
+                        candidates=lambda: connection_candidates(self.hass, address),
+                    )
+                except TikteckResetError as err:
+                    _LOGGER.warning("Tikteck %s: RF reset failed: %s", address, err)
+                    errors["base"] = "rf_reset_failed"
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Tikteck %s: RF reset error", address)
+                    errors["base"] = "rf_reset_failed"
+                else:
+                    # The reply echo is unreliable (the bulb acks even when it doesn't
+                    # reset), so the ground truth is whether it now pairs with the default
+                    # password. Always verify, whatever the echo said.
+                    _LOGGER.info(
+                        "Tikteck %s: RF reset reply %s (success_discriminator=%s); verifying default pairing",
+                        address, detail or "none", ok,
+                    )
+                    verified = await self._verify_default_login(address)
+                    if verified:
+                        _LOGGER.info(
+                            "Tikteck %s: default pairing confirmed after reset — adding bulb", address
+                        )
+                        await self.async_set_unique_id(address, raise_on_progress=False)
+                        self._abort_if_unique_id_configured()
+                        return self.async_create_entry(
+                            title=f"Tikteck {address}",
+                            data={
+                                CONF_ADDRESS: address,
+                                CONF_PASSWORD: "123",
+                                CONF_MESH_NAME: DEFAULT_MESH_NAME,
+                            },
+                        )
+                    _LOGGER.warning(
+                        "Tikteck %s: reset not confirmed — reply %s, default login failed", address, detail
+                    )
+                    errors["base"] = "rf_reset_unverified"
+        return self.async_show_form(
+            step_id="rf_confirm",
+            data_schema=vol.Schema({}),
+            errors=errors,
+            description_placeholders={"address": address},
+        )
+
+    async def _verify_default_login(self, address: str, attempts: int = 4) -> bool:
+        """After a reset, confirm the bulb accepts the default mesh/password ('123')."""
+        for i in range(attempts):
+            await asyncio.sleep(3)  # give the bulb time to reboot into the default mesh
+            ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
+            if ble_device is None:
+                _LOGGER.debug("Tikteck %s: default-login attempt %d — bulb not seen yet", address, i + 1)
+                continue
+            bulb = TikteckBulb(
+                ble_device,
+                "123",
+                DEFAULT_MESH_NAME,
+                candidates=lambda: connection_candidates(self.hass, address),
+            )
+            try:
+                await bulb.test_login()
+            except TikteckAuthError:
+                _LOGGER.debug("Tikteck %s: default-login attempt %d rejected", address, i + 1)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Tikteck %s: default-login attempt %d error: %s", address, i + 1, err)
+            else:
+                _LOGGER.info("Tikteck %s: default login succeeded on attempt %d", address, i + 1)
+                return True
+        return False
 
     async def async_step_password(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         address = self._discovery.address if self._discovery else self.context["address"]
@@ -122,16 +261,49 @@ class TikteckOptionsFlow(OptionsFlow):
     """Let the user pick which Bluetooth adapter/proxy to use."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
-
         address = self.config_entry.data[CONF_ADDRESS]
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            options: dict[str, Any] = {CONF_ADAPTER: user_input[CONF_ADAPTER]}
+            raw = str(user_input.get(CONF_MESH_ADDRESS, "")).strip().lower()
+            if raw in ("all", "broadcast", "ffff", "0xffff"):
+                options[CONF_MESH_ADDRESS] = 0xFFFF  # drive the whole mesh
+            elif raw:
+                try:
+                    options[CONF_MESH_ADDRESS] = int(raw.removeprefix("0x"), 16)
+                except ValueError:
+                    errors["base"] = "bad_mesh_address"
+            # else: blank -> omit -> this bulb only, auto node address (the default)
+            if not errors:
+                return self.async_create_entry(data=options)
+
         choices = adapter_choices(self.hass, address)
         current = self.config_entry.options.get(CONF_ADAPTER, ADAPTER_AUTO)
         if current not in choices:
             # chosen adapter not seen right now; keep it selectable
             choices[current] = f"{current} (not currently seen)"
-        schema = vol.Schema(
-            {vol.Required(CONF_ADAPTER, default=current): vol.In(choices)}
+
+        cur_addr = self.config_entry.options.get(
+            CONF_MESH_ADDRESS, self.config_entry.data.get(CONF_MESH_ADDRESS)
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        if cur_addr is None:
+            cur_str = ""
+        elif cur_addr == 0xFFFF:
+            cur_str = "all"
+        else:
+            cur_str = f"0x{cur_addr:04X}"
+        default = default_mesh_address(self.hass, address)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADAPTER, default=current): vol.In(choices),
+                vol.Optional(CONF_MESH_ADDRESS, default=cur_str): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "default": f"0x{default:04X}" if default is not None else "unknown"
+            },
+        )
