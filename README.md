@@ -53,6 +53,16 @@ If very low settings go dark, raise `MIN_OUT`; if the curve feels off, adjust `G
 - These bulbs don't report state (`assumed_state`); HA shows the last commanded value.
 - Old Telink bulbs connect best over a nearby ESP proxy; some host adapters (e.g. Intel
   on BlueZ) connect then abort (`le-connection-abort-by-local`).
+- A **factory-reset** bulb falls back to mesh name `Smart Light` / password `123`. If you
+  can't connect to a bulb, it is almost certainly still bound to another phone's mesh
+  password — physically reset it first (power off, then toggle off/on 4×).
+
+## Protocol / developer notes
+
+See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for reverse-engineering notes on the Telink
+mesh scheme: default credentials, the pairing/ownership model, the firmware-version and
+"bound" flags readable **passively from the advertisement** (no connection), and the
+factory/RF **reset command bytes**.
 
 ## Credits
 
