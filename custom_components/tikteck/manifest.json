@@ -2,16 +2,26 @@
   "domain": "tikteck",
   "name": "Tikteck",
   "bluetooth": [
-    {"manufacturer_id": 529, "connectable": true},
-    {"local_name": "Smart Light", "connectable": true}
+    {
+      "manufacturer_id": 529,
+      "connectable": true
+    },
+    {
+      "local_name": "Smart Light",
+      "connectable": true
+    }
   ],
-  "codeowners": ["@iq860"],
+  "codeowners": [
+    "@iq860"
+  ],
   "config_flow": true,
-  "dependencies": ["bluetooth_adapters"],
+  "dependencies": [
+    "bluetooth_adapters"
+  ],
   "documentation": "https://github.com/iq860/ha-tikteck",
   "integration_type": "device",
   "iot_class": "assumed_state",
   "issue_tracker": "https://github.com/iq860/ha-tikteck/issues",
   "requirements": [],
-  "version": "0.1.1"
+  "version": "0.1.2"
 }

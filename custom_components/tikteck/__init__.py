@@ -8,10 +8,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import CONF_MESH_NAME
-from .helpers import connection_candidates
+from .helpers import ADAPTER_AUTO, CONF_ADAPTER, connection_candidates
 from .protocol import DEFAULT_MESH_NAME, TikteckBulb
 
-PLATFORMS = [Platform.LIGHT]
+PLATFORMS = [Platform.LIGHT, Platform.SENSOR]
 
 type TikteckConfigEntry = ConfigEntry[TikteckBulb]
 
@@ -22,12 +22,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: TikteckConfigEntry) -> b
     if ble_device is None:
         raise ConfigEntryNotReady(f"Tikteck bulb {address} not seen by any Bluetooth adapter/proxy")
 
+    preferred = entry.options.get(CONF_ADAPTER, ADAPTER_AUTO)
     bulb = TikteckBulb(
         ble_device,
         entry.data[CONF_PASSWORD],
         entry.data.get(CONF_MESH_NAME, DEFAULT_MESH_NAME),
-        candidates=lambda: connection_candidates(hass, address),
+        candidates=lambda: connection_candidates(hass, address, preferred),
     )
+
+    # Reload the entry when the user changes the selected adapter in options.
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
     @callback
     def _update_device(service_info: bluetooth.BluetoothServiceInfoBleak, _change) -> None:
@@ -44,6 +48,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: TikteckConfigEntry) -> b
     entry.runtime_data = bulb
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: TikteckConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: TikteckConfigEntry) -> bool:

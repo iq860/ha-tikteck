@@ -2,11 +2,19 @@
   "config": {
     "flow_title": "{name}",
     "step": {
-      "user": {"title": "Pick a Tikteck bulb", "data": {"address": "Bluetooth address"}},
+      "user": {
+        "title": "Pick a Tikteck bulb",
+        "data": {
+          "address": "Bluetooth address"
+        }
+      },
       "password": {
         "title": "Tikteck {address}",
         "description": "Enter the bulb's password (numeric code from the old Tikteck config / app). Mesh name is almost always 'Smart Light'.",
-        "data": {"password": "Password", "mesh_name": "Mesh name"}
+        "data": {
+          "password": "Password",
+          "mesh_name": "Mesh name"
+        }
       }
     },
     "error": {
@@ -14,6 +22,26 @@
       "cannot_connect": "Could not connect. Make sure the bulb is powered and the phone app is closed.",
       "not_found": "Bulb not currently seen by any Bluetooth adapter."
     },
-    "abort": {"already_configured": "This bulb is already configured."}
+    "abort": {
+      "already_configured": "This bulb is already configured."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "signal_strength": {
+        "name": "Signal strength"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tikteck adapter",
+        "description": "Choose which Bluetooth adapter or proxy to use for this bulb. 'Automatic' prefers ESP proxies, which hold connections to these bulbs better than most host adapters.",
+        "data": {
+          "adapter": "Adapter"
+        }
+      }
+    }
   }
 }

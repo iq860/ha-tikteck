@@ -12,11 +12,16 @@ from homeassistant.components.bluetooth import (
     async_ble_device_from_address,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_ADDRESS, CONF_PASSWORD
+from homeassistant.core import callback
 
 from .const import CONF_MESH_NAME, DOMAIN
-from .helpers import connection_candidates
+from .helpers import ADAPTER_AUTO, CONF_ADAPTER, adapter_choices, connection_candidates
 from .protocol import DEFAULT_MESH_NAME, TikteckAuthError, TikteckBulb
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,6 +37,11 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._discovery: BluetoothServiceInfoBleak | None = None
         self._found: dict[str, str] = {}
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry) -> TikteckOptionsFlow:
+        return TikteckOptionsFlow()
 
     async def async_step_bluetooth(self, discovery_info: BluetoothServiceInfoBleak) -> ConfigFlowResult:
         await self.async_set_unique_id(discovery_info.address)
@@ -106,3 +116,22 @@ class TikteckConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="password", data_schema=schema, errors=errors,
             description_placeholders={"address": address},
         )
+
+
+class TikteckOptionsFlow(OptionsFlow):
+    """Let the user pick which Bluetooth adapter/proxy to use."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        address = self.config_entry.data[CONF_ADDRESS]
+        choices = adapter_choices(self.hass, address)
+        current = self.config_entry.options.get(CONF_ADAPTER, ADAPTER_AUTO)
+        if current not in choices:
+            # chosen adapter not seen right now; keep it selectable
+            choices[current] = f"{current} (not currently seen)"
+        schema = vol.Schema(
+            {vol.Required(CONF_ADAPTER, default=current): vol.In(choices)}
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
