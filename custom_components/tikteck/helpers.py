@@ -78,6 +78,23 @@ def detect_mesh_address(hass: HomeAssistant, address: str) -> int | None:
     return info["dev_addr"] if info else None
 
 
+# Explicit "control every bulb on the mesh" sentinel (the Telink broadcast address).
+MESH_BROADCAST = 0xFFFF
+
+
+def default_mesh_address(hass: HomeAssistant, address: str) -> int | None:
+    """The node address to use when the user hasn't chosen one — so each lamp is its
+    own light by default. Prefer the passively-decoded address; fall back to the low
+    byte of the MAC (which equals the node address on the bulbs seen so far)."""
+    detected = detect_mesh_address(hass, address)
+    if detected is not None:
+        return detected
+    try:
+        return int(address.split(":")[-1], 16)
+    except (ValueError, IndexError):
+        return None
+
+
 def scanner_devices(hass: HomeAssistant, address: str):
     """Connectable scanners that currently see the bulb, ESP proxies first then by RSSI."""
     found = bluetooth.async_scanner_devices_by_address(hass, address, connectable=True)

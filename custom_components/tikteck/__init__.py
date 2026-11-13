@@ -8,7 +8,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import CONF_MESH_ADDRESS, CONF_MESH_NAME
-from .helpers import ADAPTER_AUTO, CONF_ADAPTER, connection_candidates, detect_mesh_address
+from .helpers import (
+    ADAPTER_AUTO,
+    CONF_ADAPTER,
+    connection_candidates,
+    default_mesh_address,
+)
 from .protocol import DEFAULT_MESH_NAME, TikteckBulb
 
 PLATFORMS = [Platform.LIGHT, Platform.SENSOR]
@@ -23,11 +28,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: TikteckConfigEntry) -> b
         raise ConfigEntryNotReady(f"Tikteck bulb {address} not seen by any Bluetooth adapter/proxy")
 
     preferred = entry.options.get(CONF_ADAPTER, ADAPTER_AUTO)
-    # Mesh command destination: an options override wins, else the value stored at
-    # setup, else a best-effort passive decode. None => broadcast to the whole mesh.
-    mesh_address = entry.options.get(CONF_MESH_ADDRESS, entry.data.get(CONF_MESH_ADDRESS))
-    if mesh_address is None:
-        mesh_address = detect_mesh_address(hass, address)
+    # Mesh command destination. Each lamp is its own light by DEFAULT: when the user
+    # hasn't chosen anything we target the bulb's own node address. An explicit value
+    # (a node address, or 0xFFFF to drive the whole mesh) overrides that.
+    stored = entry.options.get(CONF_MESH_ADDRESS, entry.data.get(CONF_MESH_ADDRESS))
+    mesh_address = stored if stored is not None else default_mesh_address(hass, address)
     bulb = TikteckBulb(
         ble_device,
         entry.data[CONF_PASSWORD],

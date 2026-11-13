@@ -74,10 +74,10 @@
     "step": {
       "init": {
         "title": "Tikteck options",
-        "description": "Adapter: which Bluetooth adapter or proxy to use. 'Automatic' prefers ESP proxies.\n\nMesh address: these bulbs share one mesh, so by default a command goes to every bulb on it. Set this bulb's own node address (hex, e.g. 0x0097) to control just this one. Leave blank to broadcast to all. Detected for this bulb: {detected}.",
+        "description": "Adapter: which Bluetooth adapter or proxy to use. 'Automatic' prefers ESP proxies.\n\nMesh address: each lamp is controlled on its own by default (this bulb's node address, {default}). To control the whole mesh from this entity instead, type 'all'. Or enter a specific node address in hex (e.g. 0x0097). Leave blank for the default. To control several lamps together, make a Home Assistant Light group helper from the individual lights.",
         "data": {
           "adapter": "Adapter",
-          "mesh_address": "Mesh address (hex, blank = all bulbs)"
+          "mesh_address": "Mesh address (blank = this bulb, 'all' = whole mesh)"
         }
       }
     }

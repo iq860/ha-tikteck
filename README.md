@@ -57,11 +57,15 @@ If very low settings go dark, raise `MIN_OUT`; if the curve feels off, adjust `G
 ## Notes & limitations
 
 - These bulbs don't report state (`assumed_state`); HA shows the last commanded value.
-- **Commands currently broadcast to the whole mesh.** Bulbs that share a mesh name +
-  password are one mesh, and commands go to the broadcast address (`0xFFFF`), so changing
-  one bulb changes them all while HA only updates the entity you touched. Per-bulb control
-  needs each bulb's unique mesh node address (decodable: see `docs/PROTOCOL.md` §5) used as
-  the command destination — planned.
+- **Each lamp is controlled on its own by default.** Bulbs that share a mesh name +
+  password are one mesh; to keep them independent the integration addresses commands to
+  each bulb's own node address (auto-derived; override per bulb under the integration's
+  options). To drive the whole mesh from one entity, set that entity's mesh address to
+  `all`. To control several lamps together, make a **Home Assistant *Light group* helper**
+  from the individual lights (Settings → Devices & services → Helpers).
+  - The auto node address is the bulb's passively-decoded address, falling back to the low
+    byte of its MAC. If a lamp stops responding after an update, set its mesh address to
+    `all` (or the correct hex node address) in the options.
 - **The *Firmware version* sensor needs a full advertisement.** ESPHome Bluetooth proxies
   relay only the first ~6 bytes of these bulbs' manufacturer data (company id + MAC); the
   firmware/flags/mesh fields are truncated, so over a proxy-only setup the sensor reads

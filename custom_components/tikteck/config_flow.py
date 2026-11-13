@@ -26,7 +26,7 @@ from .helpers import (
     CONF_ADAPTER,
     adapter_choices,
     connection_candidates,
-    detect_mesh_address,
+    default_mesh_address,
 )
 from .protocol import (
     DEFAULT_MESH_NAME,
@@ -265,14 +265,16 @@ class TikteckOptionsFlow(OptionsFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             options: dict[str, Any] = {CONF_ADAPTER: user_input[CONF_ADAPTER]}
-            raw = str(user_input.get(CONF_MESH_ADDRESS, "")).strip()
-            if raw:
+            raw = str(user_input.get(CONF_MESH_ADDRESS, "")).strip().lower()
+            if raw in ("all", "broadcast", "ffff", "0xffff"):
+                options[CONF_MESH_ADDRESS] = 0xFFFF  # drive the whole mesh
+            elif raw:
                 try:
-                    options[CONF_MESH_ADDRESS] = int(raw.lower().removeprefix("0x"), 16)
+                    options[CONF_MESH_ADDRESS] = int(raw.removeprefix("0x"), 16)
                 except ValueError:
                     errors["base"] = "bad_mesh_address"
+            # else: blank -> omit -> this bulb only, auto node address (the default)
             if not errors:
-                # Blank clears it (back to broadcast).
                 return self.async_create_entry(data=options)
 
         choices = adapter_choices(self.hass, address)
@@ -284,14 +286,17 @@ class TikteckOptionsFlow(OptionsFlow):
         cur_addr = self.config_entry.options.get(
             CONF_MESH_ADDRESS, self.config_entry.data.get(CONF_MESH_ADDRESS)
         )
-        detected = detect_mesh_address(self.hass, address)
+        if cur_addr is None:
+            cur_str = ""
+        elif cur_addr == 0xFFFF:
+            cur_str = "all"
+        else:
+            cur_str = f"0x{cur_addr:04X}"
+        default = default_mesh_address(self.hass, address)
         schema = vol.Schema(
             {
                 vol.Required(CONF_ADAPTER, default=current): vol.In(choices),
-                vol.Optional(
-                    CONF_MESH_ADDRESS,
-                    default="" if cur_addr is None else f"0x{cur_addr:04X}",
-                ): str,
+                vol.Optional(CONF_MESH_ADDRESS, default=cur_str): str,
             }
         )
         return self.async_show_form(
@@ -299,6 +304,6 @@ class TikteckOptionsFlow(OptionsFlow):
             data_schema=schema,
             errors=errors,
             description_placeholders={
-                "detected": f"0x{detected:04X}" if detected is not None else "unknown (a proxy truncates the advert that carries it)"
+                "default": f"0x{default:04X}" if default is not None else "unknown"
             },
         )
