@@ -1,15 +1,15 @@
 # Telink / Tikteck BLE mesh — protocol reverse-engineering notes
 
-Developer reference for anyone extending this integration. These findings were
-recovered by reverse-engineering a sibling app of the same device family — the
-**Ledo Smart / "LedoBLE"** app (`com.skytone.LedoBle`), built on the same
-Telink mesh stack (vendor framework: AppCan "ELBt" SDK, native lib
-`libskytone-jni.so`, Java package `com.ledosmart.*`). The on-air scheme matches
-this repo's `protocol.py` byte-for-byte (same `0x69 0x69` vendor marker, same
-opcode-at-`packet[7]` layout, same name⊕password → AES session-key handshake),
-so these notes apply directly to Tikteck bulbs.
+Developer reference for anyone extending this integration. Findings were recovered by
+reverse-engineering a sibling app of the same device family — the **Ledo Smart /
+"LedoBLE"** app (`com.skytone.LedoBle`), built on the same Telink mesh stack (vendor
+framework: AppCan "ELBt" SDK; native libs `libskytone-jni.so` + `libappcan.so`; Java
+package `com.ledosmart.*`). The on-air scheme matches this repo's `protocol.py`
+byte-for-byte (same `0x69 0x69` vendor marker, same opcode-at-`packet[7]` layout, same
+name⊕password → AES session-key handshake), so these notes apply directly to Tikteck
+bulbs.
 
-> Scope: this documents a BLE LED bulb the author owns, for local control and
+> Scope: documenting a BLE LED bulb the author owns, for local control and
 > factory-reset recovery. No cloud accounts, no third-party devices.
 
 ---
@@ -18,179 +18,250 @@ so these notes apply directly to Tikteck bulbs.
 
 | Property | Value | Notes |
 |---|---|---|
-| Default advertised name | `Smart Light` | `skName` constant; also this repo's `DEFAULT_MESH_NAME` |
+| Default advertised name | `Smart Light` | `skName`; also this repo's `DEFAULT_MESH_NAME` |
 | MAC OUI prefix | `00:21:4D` | Telink / Hangzhou Sky-tone |
-| Advertising vendor (company) id | `0x0211` (529, little-endian `11 02`) | repeated **3×** inside the manufacturer-specific AD element |
-| GATT service | `0x1910` | `NEW_SERVER_UUID`; old gen also exposes `0x1910` |
-| Command characteristic | `00010203-0405-0607-0809-0a0b0c0d1912` (handle 0x15) | `CHAR_COMMAND` — encrypted mesh commands |
-| Pair/notify characteristic | `...1914` (handle 0x1b) | `CHAR_PAIR` — login/handshake |
-| Config chars (gen-dependent) | old `0x2b10` / `0x2b11`, new `0x0d0c` | used by the "RF" reset path |
+| Advertising vendor (company) id | `0x0211` (529, LE `11 02`) | appears **3×** inside the manufacturer AD element |
+
+### GATT map (`ELBtDev.java`)
+
+Two services are used. The mesh service is tried in three UUID forms (new gen first):
+
+| Service | UUID(s) | Purpose |
+|---|---|---|
+| **Mesh** | `19100d0c-0b0a-0908-0706-050403020100` → `00010203-0405-0607-0809-0a0b0c0d1910` → `00001910-0000-1000-8000-00805f9b34fb` | login + encrypted control |
+| **SmartLight cmd** | `19200d0c-0b0a-0908-0706-050403020100` | RF-reset / "restore" channel |
+
+Characteristics are matched by **GATT property bits**, not fixed UUIDs (so they vary by
+generation). On the mesh service:
+
+| Field | Property mask | Typical UUID | Role |
+|---|---|---|---|
+| `notifyChar` | `26` (0x1A notify) | — | status notifications |
+| `rwChar` | `14` (0x0E write) | `...0d1912` (`CHAR_COMMAND`, handle 0x15) | encrypted mesh commands (`sendData(..., uuid=2)`) |
+| `upgradeChar` | `6` | — | OTA |
+| `pairChar` | `5` | `...0d1914` (`CHAR_PAIR`, handle 0x1b) | login handshake (`sendData(..., uuid=1)`) |
+| `slCmdChar` | — | **`19210d0c-0b0a-0908-0706-050403020100`** (in service `1920`) | **RF reset target** |
 
 ---
 
-## 2. Credentials & pairing model (why you can't just connect)
+## 2. Login handshake & encryption
 
-These are **Telink mesh** bulbs. Access is gated by a **mesh name + mesh
-password** pair; from those two strings the app derives an AES session key
-(`generate_sk` / `_name_pass_key` in `protocol.py`: `key[i] = name[i] ^ pw[i]`,
-then AES).
+Telink name/password scheme (already implemented in `protocol.py`):
 
-**Factory / unprovisioned defaults** (from `LedoBleSDK.java`):
+1. `generate_sk` / `_name_pass_key`: `key[i] = name[i] ^ password[i]` (each padded to 16),
+   then AES — yields the **session key `sk`**.
+2. App writes a login request (`setTlLoginData(name, password, mac)`) to **`pairChar`**,
+   then reads it back; the exchange derives `sk` for the connection.
+3. All control commands are AES-encrypted with `sk` (`encrypt_packet`) and written to
+   **`rwChar`**; status comes back on `notifyChar`.
 
-| Field | Default | Source constant |
+Mesh command frame (20 bytes, before encryption) — `0x69 0x69` is the vendor id and the
+byte right before it (`packet[7]`) is the **opcode**:
+
+```
+[0..1] seq   [2] 0  [3..4] sk-checksum  [5..6] msgid (0xFFFF = broadcast, or devAddr)
+[7] opcode   [8..9] 0x69 0x69 vendor    [10..] params
+```
+
+**Factory / unprovisioned defaults** (`LedoBleSDK.java`):
+
+| Field | Default | Constant |
 |---|---|---|
 | Mesh name | `Smart Light` | `skName` |
 | Mesh password | `123` | `DEFAULT_PW` |
-| LTK | *(none / stock Telink)* | `skLtk = null` |
+| LTK | *(stock Telink)* | `skLtk = null` |
 | Factory mesh-net id | `10` | `MANUF_D_MESHNET_ID` |
 | Factory product id | `2` | `MANUF_D_MESHPRO_ID` |
 
-**Provisioning ("add device") flow:** the app connects to a fresh bulb as
-`Smart Light` / `123`, then immediately calls `setKey(newPassword)` to overwrite
-the mesh password with the **house/family secret**. That new password *is* the
-"authorized code" the app's Family screen asks you to create and share. Once
-written, only clients holding that password can derive the session key and
-control the bulb — which is why a second phone/integration sees the bulb but
-can't connect.
-
-**Consequence:** you cannot software-reset or re-pair a bulb whose current
-password you don't have (see §4). The escape hatch is the **physical reset**
-(§3), which restores `Smart Light` / `123`.
+**Ownership model:** adding a bulb connects as `Smart Light`/`123`, then calls
+`setKey(newPassword)` to overwrite the mesh password with the **house/family secret**
+(the "authorized code" shared via the Family QR). Afterwards only clients holding that
+password can derive `sk`. That is why a second phone/integration sees the bulb but can't
+control it — and why the **encrypted** factory reset (§4.2) requires you to already know
+the password.
 
 ---
 
-## 3. Physical factory reset (no connection, no password needed)
+## 3. Reset — the decision tree
 
-From the app's (decrypted) `reset.html`, two procedures exist, selected by the
-bulb's firmware `version`:
+There are **three** distinct reset mechanisms. Picking the right one is the whole game
+for recovering a bulb whose password you don't have.
 
-- **Firmware < 24 — pure hardware:** power the bulb on for ≥ 5 s, then switch it
-  **off/on 4 times**. It blinks when reset.
-- **Firmware ≥ 24 — timed app assist:** power it off, power on, and trigger the
-  "Restore" within **1 minute** of power-on while close to it. During that
-  post-boot window the bulb accepts the RF-reset command (§4.1) with default
-  credentials.
+| Method | Needs password? | Needs connection? | When it works | Firmware |
+|---|---|---|---|---|
+| **Power-cycle** (§4.0) | No | No (pure hardware) | anytime | `< 24` |
+| **RF reset** (§4.1) | **No** | Yes, but **no login** | **only within ~1 min of power-on** | `≥ 24` |
+| **Factory reset / resetAll** (§4.2) | **Yes** | Yes, authenticated | anytime while connected | any |
 
-Either way the bulb returns to **`Smart Light` / `123`**, ready to be adopted by
-any client.
+**→ For a bulb you can't own/connect to, the RF reset (§4.1) is the key: it resets the
+bulb WITHOUT its current password, because the firmware accepts it unauthenticated during
+a short post-power-on window.** This is the most important finding in this document.
+
+Firmware version is the branch selector and is **readable passively** (§5), so a client
+can decide which path to offer before connecting.
 
 ---
 
-## 4. Reset commands (recovered from `libskytone-jni.so`)
+## 4. Reset mechanisms in detail
 
-Both reset paths ultimately require the native command builders below. The
-payload is a 20-byte buffer; mesh commands are AES-encrypted with the session
-key before the GATT write (`encrypt_packet` in this repo).
+### 4.0 Power-cycle (hardware, firmware < 24)
 
-### 4.1 RF reset — `BTDataHandle_RfReset`  (the "Restore" button)
+From the app's decrypted `reset.html`, exact wording:
+- *"power on the bulb at least 5 seconds"*
+- *"please turn off/on the bulb for 4 times to reset the bulb"*
+- *"if bulb begin to blink, that means the bulb is restore succeed"*
 
-Java: `rfReset(mac, only_pwd)` → `uexELBtSDK.rfReset`. Builds a short
-config-channel frame:
+Pure firmware behaviour; no BLE involved. If this isn't working for you, the bulb is very
+likely **firmware ≥ 24**, which does **not** reset on power-cycles — it needs the RF reset
+below instead.
+
+### 4.1 RF reset — `BTDataHandle_RfReset` (the "Restore" button, firmware ≥ 24)
+
+`reset.html` wording: *"power the bulb off and power it on again; move the smart phone
+closer to the bulb, and click Restore **within 1 minute** after it power on; bulb will
+finish restore after blinking."*
+
+Code path: JS `reset()` → `bleReset(mac,false)` → `LedoBleSDK.rfReset(mac, only_pwd=false)`
+→ `rfResetConnect()`. Crucially, `rfResetConnect` connects and, **on connect, calls
+`tmpDev.rfReset()` with an EMPTY `loginCallback` — no authentication.** `ELBtDev.rfReset`
+then writes a plaintext frame to **`slCmdChar` (`19210d0c-...`, service `1920`)** and reads
+back after 500 ms:
 
 ```
 byte[0] = 0x69      # 'i'  ELBt config magic
 byte[1] = 0x69      # 'i'
 byte[2] = 0x11      # sub-command: RF reset
-byte[3] = flag      # 0x00 = full restore (name+pwd+config)   <-- "Restore" uses this
+byte[3] = flag      # 0x00 = full restore (name+pwd+config)   <-- "Restore" uses 0x00
                     # 0x01 = password-only reset
-# length sent = 16 bytes (rest zero)
+# 16 bytes sent, NOT encrypted
 ```
 
-Success reply (`BTDataHandle_RfReset_result`): echoes `69 69 11 10`, with a
-status byte at offset 4 (`0x37` observed as the ok/err discriminator).
+Success reply (`BTDataHandle_RfReset_result`): echoes `69 69 11 10`, status byte at
+offset 4 (`0x37` = ok discriminator).
 
-> This is the path used right after power-on; it works while the bulb is briefly
-> listening with default credentials, which is why timing/proximity matter.
+**Why it works without the password:** the write goes to the separate SmartLight command
+characteristic, not the encrypted mesh `rwChar`, and the firmware only honours it during
+the ~1-minute window after a cold boot. That window + physical power access *is* the
+security model (you must be present and quick), which is exactly what lets a legitimate
+owner recover a bulb they were locked out of.
+
+**HA integration recipe (recommended feature):**
+1. Ask the user to power-cycle the bulb (off, then on).
+2. Immediately connect (Bleak) to the bulb — **no login/pairing**.
+3. Discover service `19200d0c-...`, characteristic `19210d0c-...`.
+4. `write_gatt_char(0x1921…, bytes([0x69,0x69,0x11,0x00] + [0]*12), response=False)`.
+5. Optionally read back and check for `69 69 11 10`. Must complete inside ~60 s of boot.
 
 ### 4.2 Factory reset ("reset all") — `BTDataHandle_resetAll`
 
-Java: `factoryReset(devAddr)` → `mainDev.sendData(senddata, /*encrypt=*/true, 2)`.
-Device-targeted mesh command, **AES-encrypted** (`BTDataHandle_encryption_data`
-is called before return):
+`factoryReset(devAddr)` → guarded by `isConnected()` → `mainDev.sendData(data, enc=true, 2)`.
+Device-targeted mesh command, **AES-encrypted** (`BTDataHandle_encryption_data` before
+send):
 
 ```
-byte[0..2] = seq       # 3-byte rolling sequence (global counter)
-byte[3]    = 0x03
-byte[4]    = 0x04
-byte[5..6] = devAddr   # little-endian target mesh address
-byte[7]    = 0xFC      # opcode  (sits immediately before the 69 69 vendor id,
-                       #          exactly where protocol.py puts packet[7]=command)
-byte[8]    = 0x69      # vendor id lo  }  == this repo's packet[8]/[9]
-byte[9]    = 0x69      # vendor id hi  }
-# remainder zero; 20 bytes total, then AES-ECB per encrypt_packet()
+[0..2] seq   [3] 0x03  [4] 0x04  [5..6] devAddr (LE)
+[7] 0xFC opcode   [8..9] 0x69 0x69 vendor   (20 bytes, then AES-ECB)
 ```
 
-Requires an **authenticated** connection first (`isConnected()` guard), i.e. you
-must already hold the bulb's current password. Confirms the "can't reset what you
-can't connect to" limitation for the *software* path.
+Requires a logged-in session (you must hold the current password). Use when you *do* own
+the bulb and want a clean wipe.
+
+> There is also a `BTDataHandle_reboot` builder (soft reboot, opcode byte at `[7]`),
+> distinct from reset — it restarts the bulb without clearing credentials.
 
 ---
 
 ## 5. Passive detection from the advertisement (no connection) ⭐
 
-The single most useful finding for this integration: **firmware version,
-bound/used state, device address and mesh-net id are all broadcast in the
-advertisement** and can be read during a passive scan — no GATT, no password.
+Firmware version, bound/used state, device address and mesh-net id are all **broadcast**
+and readable in a passive scan — no GATT, no password.
 
-Parsing (`SkBtDevice.Create` + native `BTDataHandle_manu_elem`): locate the
-manufacturer-specific AD element whose **company id `0x0211`** appears (the app
-scans for the 3rd occurrence of the `11 02` byte pair as the block start). Call
-the start of that manufacturer block `manu[]`. Then:
+Parsing (`SkBtDevice.Create` + native `BTDataHandle_manu_elem`): find the
+manufacturer-specific AD element for **company id `0x0211`** (the app keys off the 3rd
+occurrence of the `11 02` pair as block start). Call that block `manu[]`:
 
 | Field | Location in `manu[]` | Meaning |
 |---|---|---|
 | type | `manu[8]` | product type |
 | sub-type | `manu[9]` | product sub-type |
-| **bound / "used"** | `manu[10] & 0x01` | 1 = already provisioned to a mesh (not addable) |
-| **firmware version** | `manu[10] >> 2` | 6-bit firmware version — the `version` the reset flow branches on (the "< 24 vs ≥ 24" test) |
+| **bound / "used"** | `manu[10] & 0x01` | 1 = provisioned to a mesh (not addable) |
+| **firmware version** | `manu[10] >> 2` | 6-bit version; the `< 24` vs `≥ 24` reset selector |
 | device address | `manu[11..12]` (u16 LE) | mesh node address |
-| mesh-net id | `manu[13..14]` (u16 LE) | which mesh the bulb belongs to |
+| mesh-net id | `manu[13..14]` (u16 LE) | which mesh it belongs to |
 
-Byte offsets decoded from the `manu_elem` jump table in `libskytone-jni.so`
-(element index → offset: 4→8, 5→9, 6→`[10]&1`, 7→`[10]>>2`, 9→`[11:13]`,
-10→`[13:15]`).
+Offsets decoded from the `manu_elem` jump table in `libskytone-jni.so` (element→offset:
+4→8, 5→9, 6→`[10]&1`, 7→`[10]>>2`, 9→`[11:13]`, 10→`[13:15]`).
 
-**Integration opportunity:** a `firmware_version` sensor and a `bound`/`paired`
-binary sensor could be populated **passively from `advertisement_data`** in the
-config-flow / coordinator, without ever connecting — useful for diagnostics and
-for telling the user whether a bulb still needs a physical reset. With nRF
-Connect you can verify this by hand: read the manufacturer data for company
-`0x0211` and apply the table above.
+**Integration opportunity:** expose `firmware_version` + a `bound` binary sensor from
+`advertisement_data` with no connection. Combined with §3 this lets the UI tell the user
+up front whether a bulb needs a power-cycle reset (<24) or an RF reset (≥24), and whether
+it's already claimed by another mesh.
 
 ---
 
-## 6. How these notes were obtained (methodology, for reproducibility)
+## 6. Command surface (native `BTDataHandle_*`, for future feature work)
 
-The app ships 32-bit-ARM-only native libs (`lib/armeabi`, no arm64), so it can't
-run on Apple-silicon emulators (`INSTALL_FAILED_NO_MATCHING_ABIS`). It was run
-instead in **redroid** (containerised Android, no hypervisor) on an Ampere ARM
-host whose CPU supports 32-bit EL0. Steps:
+Control/state commands build the mesh frame of §2 (vendor `0x69 0x69`, opcode at `[7]`;
+observed state opcodes `0xA9`/`0xAA`) and are AES-encrypted to `rwChar`. Full builder set
+in `libskytone-jni.so`:
 
-1. **Static:** `jadx` on `classes.dex` → `com.ledosmart.*` (credentials, flow),
-   and `arm-linux-gnueabi-objdump -M force-thumb` on `libskytone-jni.so` for the
-   reset builders and the advertisement parser (`BTDataHandle_manu_elem`).
-2. **Assets:** the vendor framework (AppCan "3G2WIN Safe Guard") encrypts every
-   HTML/JS asset (incl. `reset.html`) with a native RC4 keyed by an MD5 chain
-   over the app's `appkey` resource + a 255-byte salt (`nativeHtmlDecode` in
-   `libappcan.so`). Rather than reimplement it, the running app's WebView is
-   debuggable — attach via Chrome DevTools over adb
-   (`adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`, CDP with
-   `suppress_origin`) and read the already-decrypted DOM/JS.
-3. **Cross-check:** confirmed the on-air command layout against this repo's
-   existing `protocol.py` (independent port of `mjg59/python-tikteck`).
-
-No Bluetooth radio exists in the container, so the reset commands were recovered
-from code, not captured on-air. To validate end-to-end, capture an HCI snoop log
-from a phone running the real app while it resets a bulb, and compare against
-§4.
+```
+State/light : setState setStateWithFilter setDefaultState setDefaultStateWithFilter
+              setDynamic setRainbow setGradient setFlickerState setSpecialEffects
+              setFindme setDefindMosquito setUdimmerOnOff setUdimmerRollback
+Groups      : setGRP getGRP setGrpList isValidGroup
+Switch/relay: setRelayState setWallSwitchBr setStateCurtain setMaxValueCurtain
+Timers/alarm: setTimer setTimerWithFlick setTimerWithGradual setTimerWithTriggle
+              getAlarmData alarmData alarm2json setUTC getUTC getTimeZone
+Status/meta : getState OnlineStateParse getFwVer getLastCmdRst
+              electricityConsumption* reboot
+Reset/keys  : RfReset RfReset_result resetAll setKey(setCurCommunity*)
+Crypto      : encryption_data decryption_data
+```
 
 ---
 
-## 7. Open questions / next steps
+## 7. How these notes were obtained (reproducibility)
 
-- Confirm `0xFC` (factory) vs the control opcodes by diffing an HCI snoop log.
-- Determine whether the RF-reset frame (§4.1) is written to `0x0d0c` (new gen)
-  or `0x2b11` (old gen), and whether it is sent plaintext on the config channel.
-- Implement passive `firmware_version` + `bound` sensors (§5).
-- Map the remaining `com.ledosmart.ELBtBridge` native methods (timers, scenes,
-  switch events) if timer/scene support is ever added here.
+The app ships 32-bit-ARM-only libs (`lib/armeabi`, no arm64) → can't run on Apple-silicon
+emulators (`INSTALL_FAILED_NO_MATCHING_ABIS`). Run instead in **redroid** (containerised
+Android, no hypervisor) on an Ampere ARM host with 32-bit EL0 support.
+
+1. **Static:** `jadx` on `classes.dex` (`com.ledosmart.*`); `arm-linux-gnueabi-objdump
+   -M force-thumb` on `libskytone-jni.so` for reset builders + `manu_elem`.
+2. **Assets:** AppCan "3G2WIN Safe Guard" encrypts every HTML/JS asset (incl.
+   `reset.html`) with native RC4 keyed by MD5(appkey + 255-byte salt) (`nativeHtmlDecode`
+   in `libappcan.so`). Instead of reimplementing it, the running app's WebView is
+   debuggable: `adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`, then
+   Chrome DevTools Protocol with `suppress_origin`, navigate to
+   `content://com.skytone.LedoBle.sp/android_asset/widget/<file>` and read the
+   already-decrypted DOM.
+3. **Cross-check:** on-air layout confirmed against this repo's `protocol.py` (port of
+   `mjg59/python-tikteck`).
+
+No BLE radio exists in the container, so commands were recovered from code, not captured
+on-air.
+
+---
+
+## 8. Open questions / next steps
+
+**Answered this session:** default creds (`Smart Light`/`123`); why software reset needs
+the password; that RF reset does **not** (unauthenticated write to `1921`/`1920` in the
+power-on window); firmware version is passively readable (`manu[10]>>2`); factory-reset
+opcode `0xFC`; the full GATT + command map.
+
+**Still open — validate before relying on in production:**
+- [ ] **Capture an HCI snoop log** from a phone running the real app during (a) an RF
+  reset and (b) a factory reset, and diff against §4.1/§4.2 byte-for-byte. This is the
+  one thing not verified on-air.
+- [ ] Confirm the exact length of the RF-reset power-on window per firmware (doc says
+  "~1 min"; may differ) and whether `slCmdChar` must be written with/without response.
+- [ ] Confirm whether firmware `< 24` exposes service `1920` at all (if not, those bulbs
+  are power-cycle-only and an RF-reset button should be hidden for them).
+- [ ] Decode the `setKey` frame (opcode + payload) so an integration could *re-key* a
+  bulb (change its password) rather than only reset it.
+- [ ] Map control opcodes precisely (`setState`/`setDynamic`/`setGradient` params) if
+  effects/scenes/timers are ever added here.
+- [ ] Verify `getState` / `OnlineStateParse` so the integration could drop `assumed_state`
+  and report real on/off + colour.
