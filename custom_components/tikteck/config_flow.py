@@ -20,8 +20,14 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS, CONF_PASSWORD
 from homeassistant.core import callback
 
-from .const import CONF_MESH_NAME, DOMAIN
-from .helpers import ADAPTER_AUTO, CONF_ADAPTER, adapter_choices, connection_candidates
+from .const import CONF_MESH_ADDRESS, CONF_MESH_NAME, DOMAIN
+from .helpers import (
+    ADAPTER_AUTO,
+    CONF_ADAPTER,
+    adapter_choices,
+    connection_candidates,
+    detect_mesh_address,
+)
 from .protocol import (
     DEFAULT_MESH_NAME,
     TikteckAuthError,
@@ -255,16 +261,44 @@ class TikteckOptionsFlow(OptionsFlow):
     """Let the user pick which Bluetooth adapter/proxy to use."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
-
         address = self.config_entry.data[CONF_ADDRESS]
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            options: dict[str, Any] = {CONF_ADAPTER: user_input[CONF_ADAPTER]}
+            raw = str(user_input.get(CONF_MESH_ADDRESS, "")).strip()
+            if raw:
+                try:
+                    options[CONF_MESH_ADDRESS] = int(raw.lower().removeprefix("0x"), 16)
+                except ValueError:
+                    errors["base"] = "bad_mesh_address"
+            if not errors:
+                # Blank clears it (back to broadcast).
+                return self.async_create_entry(data=options)
+
         choices = adapter_choices(self.hass, address)
         current = self.config_entry.options.get(CONF_ADAPTER, ADAPTER_AUTO)
         if current not in choices:
             # chosen adapter not seen right now; keep it selectable
             choices[current] = f"{current} (not currently seen)"
-        schema = vol.Schema(
-            {vol.Required(CONF_ADAPTER, default=current): vol.In(choices)}
+
+        cur_addr = self.config_entry.options.get(
+            CONF_MESH_ADDRESS, self.config_entry.data.get(CONF_MESH_ADDRESS)
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        detected = detect_mesh_address(self.hass, address)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADAPTER, default=current): vol.In(choices),
+                vol.Optional(
+                    CONF_MESH_ADDRESS,
+                    default="" if cur_addr is None else f"0x{cur_addr:04X}",
+                ): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "detected": f"0x{detected:04X}" if detected is not None else "unknown (a proxy truncates the advert that carries it)"
+            },
+        )

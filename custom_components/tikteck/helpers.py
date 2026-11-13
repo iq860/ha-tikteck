@@ -49,6 +49,35 @@ def parse_telink_adv(manufacturer_data: dict[int, bytes] | None) -> dict | None:
     }
 
 
+def best_manufacturer_data(hass: HomeAssistant, address: str) -> dict[int, bytes] | None:
+    """Manufacturer data from whichever source carries the FULL Telink block.
+
+    ESPHome proxies relay only the first ~6 bytes, so prefer any scanner whose
+    company-529 payload is long enough to decode (a host adapter); else return
+    whatever is available.
+    """
+    candidates: list[dict[int, bytes]] = []
+    for sd in scanner_devices(hass, address):
+        if sd.advertisement and sd.advertisement.manufacturer_data:
+            candidates.append(sd.advertisement.manufacturer_data)
+    last = bluetooth.async_last_service_info(
+        hass, address, connectable=False
+    ) or bluetooth.async_last_service_info(hass, address, connectable=True)
+    if last and last.manufacturer_data:
+        candidates.append(last.manufacturer_data)
+    for mfr in candidates:
+        value = mfr.get(TELINK_COMPANY_ID)
+        if value is not None and len(value) >= 13:
+            return mfr
+    return candidates[0] if candidates else None
+
+
+def detect_mesh_address(hass: HomeAssistant, address: str) -> int | None:
+    """The bulb's mesh node address decoded passively, if a full advert is available."""
+    info = parse_telink_adv(best_manufacturer_data(hass, address))
+    return info["dev_addr"] if info else None
+
+
 def scanner_devices(hass: HomeAssistant, address: str):
     """Connectable scanners that currently see the bulb, ESP proxies first then by RSSI."""
     found = bluetooth.async_scanner_devices_by_address(hass, address, connectable=True)

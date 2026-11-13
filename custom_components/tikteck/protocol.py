@@ -183,12 +183,16 @@ class TikteckBulb:
         password: str,
         name: str = DEFAULT_MESH_NAME,
         candidates: Callable[[], list[tuple[str, BLEDevice]]] | None = None,
+        mesh_address: int | None = None,
     ) -> None:
         self._ble_device = ble_device
         # Returns [(adapter label, BLEDevice), ...] in the order to try.
         self._candidates = candidates
         self._password = password
         self._name = name
+        # Destination for mesh commands. None => 0xFFFF broadcast (every bulb on the mesh
+        # obeys). A node address => only that bulb, so entities control one bulb each.
+        self._mesh_address = mesh_address
         self._mac = [int(x, 16) for x in reversed(ble_device.address.split(":"))]
         self._client: BleakClientWithServiceCache | None = None
         self._sk: list[int] | None = None
@@ -198,6 +202,13 @@ class TikteckBulb:
 
     def set_ble_device(self, ble_device: BLEDevice) -> None:
         self._ble_device = ble_device
+
+    @property
+    def mesh_address(self) -> int | None:
+        return self._mesh_address
+
+    def set_mesh_address(self, mesh_address: int | None) -> None:
+        self._mesh_address = mesh_address
 
     @property
     def address(self) -> str:
@@ -267,8 +278,11 @@ class TikteckBulb:
                     packet = [0] * 20
                     packet[0] = self._seq & 0xFF
                     packet[1] = (self._seq >> 8) & 0xFF
-                    packet[5] = 0xFF  # msgid 0xffff low byte
-                    packet[6] = 0xFF  # msgid | 0x80
+                    # Destination address (little-endian). 0xFFFF = broadcast to the whole
+                    # mesh; a node address targets a single bulb.
+                    dest = 0xFFFF if self._mesh_address is None else self._mesh_address
+                    packet[5] = dest & 0xFF
+                    packet[6] = (dest >> 8) & 0xFF
                     packet[7] = command
                     packet[8] = 0x69
                     packet[9] = 0x69

@@ -68,12 +68,16 @@
     }
   },
   "options": {
+    "error": {
+      "bad_mesh_address": "Mesh address must be a hex number like 0x0097 (or just 97)."
+    },
     "step": {
       "init": {
-        "title": "Tikteck adapter",
-        "description": "Choose which Bluetooth adapter or proxy to use for this bulb. 'Automatic' prefers ESP proxies, which hold connections to these bulbs better than most host adapters.",
+        "title": "Tikteck options",
+        "description": "Adapter: which Bluetooth adapter or proxy to use. 'Automatic' prefers ESP proxies.\n\nMesh address: these bulbs share one mesh, so by default a command goes to every bulb on it. Set this bulb's own node address (hex, e.g. 0x0097) to control just this one. Leave blank to broadcast to all. Detected for this bulb: {detected}.",
         "data": {
-          "adapter": "Adapter"
+          "adapter": "Adapter",
+          "mesh_address": "Mesh address (hex, blank = all bulbs)"
         }
       }
     }

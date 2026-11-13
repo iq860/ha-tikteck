@@ -7,8 +7,8 @@ from homeassistant.const import CONF_ADDRESS, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import CONF_MESH_NAME
-from .helpers import ADAPTER_AUTO, CONF_ADAPTER, connection_candidates
+from .const import CONF_MESH_ADDRESS, CONF_MESH_NAME
+from .helpers import ADAPTER_AUTO, CONF_ADAPTER, connection_candidates, detect_mesh_address
 from .protocol import DEFAULT_MESH_NAME, TikteckBulb
 
 PLATFORMS = [Platform.LIGHT, Platform.SENSOR]
@@ -23,11 +23,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: TikteckConfigEntry) -> b
         raise ConfigEntryNotReady(f"Tikteck bulb {address} not seen by any Bluetooth adapter/proxy")
 
     preferred = entry.options.get(CONF_ADAPTER, ADAPTER_AUTO)
+    # Mesh command destination: an options override wins, else the value stored at
+    # setup, else a best-effort passive decode. None => broadcast to the whole mesh.
+    mesh_address = entry.options.get(CONF_MESH_ADDRESS, entry.data.get(CONF_MESH_ADDRESS))
+    if mesh_address is None:
+        mesh_address = detect_mesh_address(hass, address)
     bulb = TikteckBulb(
         ble_device,
         entry.data[CONF_PASSWORD],
         entry.data.get(CONF_MESH_NAME, DEFAULT_MESH_NAME),
         candidates=lambda: connection_candidates(hass, address, preferred),
+        mesh_address=mesh_address,
     )
 
     # Reload the entry when the user changes the selected adapter in options.
