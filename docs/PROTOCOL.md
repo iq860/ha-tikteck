@@ -238,6 +238,13 @@ it's already claimed by another mesh.
 > | `…02:0C:46` | `1102 460c024d 1a01 95 4600 5b5e a92d` | 37 | `0x0046` |
 > | `…03:0C:1D` | `1102 1d0c034d 1a01 95 9900 336b d619` | 37 | `0x0099` |
 >
+> **Proxy caveat:** an **ESPHome Bluetooth proxy relays only the first ~6 bytes** of this
+> block (`11 02` + the 4 MAC bytes, e.g. `11021d0c034d`) — the fields at offset 8+
+> (firmware/flags/node/mesh) are **truncated**. Decode them only from a source that
+> delivers the full block (a host adapter); over a proxy the firmware sensor stays
+> unavailable. The node address below is still useful: for independent (non-broadcast)
+> control each bulb's node address is the mesh command destination (see §2 / §6).
+>
 > `node addr` = `value[9:11]` LE; for two of the three it equals the MAC's low byte
 > (`0x97`, `0x46`), which anchors the offsets. The third is a mesh-assigned address (that
 > bulb is bound to another phone's mesh). All three are firmware **37 (≥24)** → RF-reset

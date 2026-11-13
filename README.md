@@ -57,6 +57,15 @@ If very low settings go dark, raise `MIN_OUT`; if the curve feels off, adjust `G
 ## Notes & limitations
 
 - These bulbs don't report state (`assumed_state`); HA shows the last commanded value.
+- **Commands currently broadcast to the whole mesh.** Bulbs that share a mesh name +
+  password are one mesh, and commands go to the broadcast address (`0xFFFF`), so changing
+  one bulb changes them all while HA only updates the entity you touched. Per-bulb control
+  needs each bulb's unique mesh node address (decodable: see `docs/PROTOCOL.md` §5) used as
+  the command destination — planned.
+- **The *Firmware version* sensor needs a full advertisement.** ESPHome Bluetooth proxies
+  relay only the first ~6 bytes of these bulbs' manufacturer data (company id + MAC); the
+  firmware/flags/mesh fields are truncated, so over a proxy-only setup the sensor reads
+  *unavailable*. A host Bluetooth adapter in range sees the whole block and it populates.
 - Old Telink bulbs connect best over a nearby ESP proxy; some host adapters (e.g. Intel
   on BlueZ) connect then abort (`le-connection-abort-by-local`).
 - A **factory-reset** bulb falls back to mesh name `Smart Light` / password `123`. If you

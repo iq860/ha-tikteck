@@ -1,6 +1,8 @@
 """Tikteck diagnostic sensors (BLE signal strength of the connecting adapter)."""
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components import bluetooth
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -13,7 +15,16 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceIn
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import TikteckConfigEntry
-from .helpers import ADAPTER_AUTO, CONF_ADAPTER, active_scanner, parse_telink_adv
+from .helpers import (
+    ADAPTER_AUTO,
+    CONF_ADAPTER,
+    TELINK_COMPANY_ID,
+    active_scanner,
+    parse_telink_adv,
+    scanner_devices,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -42,19 +53,56 @@ class TikteckFirmwareSensor(SensorEntity):
     def __init__(self, entry: TikteckConfigEntry) -> None:
         self._address = entry.data[CONF_ADDRESS]
         self._attr_unique_id = f"{self._address}_firmware"
+        self._attr_native_value = None
         self._attr_device_info = DeviceInfo(
             connections={(CONNECTION_BLUETOOTH, self._address)}
         )
 
+    def _manufacturer_data(
+        self, service_info: bluetooth.BluetoothServiceInfoBleak | None
+    ) -> dict[int, bytes] | None:
+        """Best available manufacturer data, preferring a source with the FULL Telink block.
+
+        ESPHome Bluetooth proxies only relay the first ~6 bytes of these bulbs'
+        manufacturer data (company id + MAC) — the firmware/flags/mesh fields (offset 8+)
+        are truncated. The host adapter sees the whole block. So gather every source that
+        sees the bulb and pick the one whose company-529 payload is long enough to decode;
+        fall back to any payload (so other code paths still see something).
+        """
+        candidates: list[dict[int, bytes]] = []
+        if service_info is not None and service_info.manufacturer_data:
+            candidates.append(service_info.manufacturer_data)
+        for sd in scanner_devices(self.hass, self._address):
+            if sd.advertisement and sd.advertisement.manufacturer_data:
+                candidates.append(sd.advertisement.manufacturer_data)
+        last = bluetooth.async_last_service_info(
+            self.hass, self._address, connectable=False
+        ) or bluetooth.async_last_service_info(self.hass, self._address, connectable=True)
+        if last and last.manufacturer_data:
+            candidates.append(last.manufacturer_data)
+        for mfr in candidates:
+            value = mfr.get(TELINK_COMPANY_ID)
+            if value is not None and len(value) >= 13:
+                return mfr
+        return candidates[0] if candidates else None
+
     @callback
     def _refresh(self, service_info: bluetooth.BluetoothServiceInfoBleak | None) -> None:
-        if service_info is None:
-            service_info = bluetooth.async_last_service_info(
-                self.hass, self._address, connectable=False
+        mfr = self._manufacturer_data(service_info)
+        if mfr and 529 in mfr:
+            _LOGGER.debug(
+                "Tikteck %s: firmware refresh, 529 len=%d hex=%s",
+                self._address, len(mfr[529]), mfr[529].hex(),
             )
-        info = parse_telink_adv(service_info.manufacturer_data) if service_info else None
+        else:
+            _LOGGER.debug("Tikteck %s: firmware refresh, mfr keys=%s", self._address, list(mfr) if mfr else None)
+        info = parse_telink_adv(mfr)
         if info is None:
-            self._attr_available = False
+            # These bulbs alternate advert packets and only some carry the Telink
+            # manufacturer block, so a packet without it is normal — keep the last
+            # decoded value instead of flipping the sensor to unavailable.
+            if self._attr_native_value is None:
+                self._attr_available = False
             return
         self._attr_available = True
         self._attr_native_value = info["firmware"]
